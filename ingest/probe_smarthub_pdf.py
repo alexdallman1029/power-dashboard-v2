@@ -50,6 +50,8 @@ def main(bill_date: str, stem: str = "") -> None:
     for name, url in variants.items():
         status, b = _get(url, headers)
         print(f"PDF request ({name}): HTTP {status}, {len(b)} bytes, starts with {b[:5]!r}")
+        if len(b) < 500 and not b.lstrip().startswith(b"<"):
+            print("  short message from server (digits masked):", re.sub(r"\d", "#", b.decode("utf-8", "replace")))
         if status == 200 and b.startswith(b"%PDF"):
             body = b
             break

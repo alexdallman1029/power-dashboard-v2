@@ -22,18 +22,22 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Probe SmartHub
+      - name: 1 - Usage response shape
         env:
           SMARTHUB_USERNAME: ${{ secrets.SMARTHUB_USERNAME }}
           SMARTHUB_PASSWORD: ${{ secrets.SMARTHUB_PASSWORD }}
           SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
           SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
-        run: |
-          python ingest/probe_smarthub.py
-          echo
-          echo "===== BILLING HISTORY SHAPE ====="
-          python -m ingest.probe_smarthub_billing
-      - name: Bill PDF layout (digits masked)
+        run: python ingest/probe_smarthub.py
+      - name: 2 - Billing history shape (PASTE THIS ONE)
+        if: always()
+        env:
+          SMARTHUB_USERNAME: ${{ secrets.SMARTHUB_USERNAME }}
+          SMARTHUB_PASSWORD: ${{ secrets.SMARTHUB_PASSWORD }}
+          SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
+          SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
+        run: python -m ingest.probe_smarthub_billing
+      - name: 3 - Bill PDF layout (digits masked)
         if: always()
         env:
           SMARTHUB_USERNAME: ${{ secrets.SMARTHUB_USERNAME }}
