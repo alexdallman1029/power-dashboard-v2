@@ -1,0 +1,24 @@
+name: Utility (SmartHub) probe
+
+# Diagnostic only: prints the structure of SmartHub's responses (no tokens or readings).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Probe SmartHub
+        env:
+          SMARTHUB_USERNAME: ${{ secrets.SMARTHUB_USERNAME }}
+          SMARTHUB_PASSWORD: ${{ secrets.SMARTHUB_PASSWORD }}
+          SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
+          SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
+        run: python ingest/probe_smarthub.py
