@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 
 from billing.tenant_charges import calculate_tenant_charges
+from billing.compute import tenant_charges_for_period
+from billing.period import BILLING_DAY, billing_period_for_ym
 
 
 #---------------------------
@@ -79,31 +81,8 @@ def query_df(sql: str, params: tuple = ()) -> pd.DataFrame:
 def first_of_month(d: dt.date) -> dt.date:
     return dt.date(d.year, d.month, 1)
 
-BILLING_DAY = 23  # Emporia billing cycle day
 
-def last_day_of_month(d: dt.date) -> int:
-    next_month = (d.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
-    return (next_month - dt.timedelta(days=1)).day
 
-def clamp_day(year: int, month: int, day: int) -> dt.date:
-    dmax = last_day_of_month(dt.date(year, month, 1))
-    return dt.date(year, month, min(day, dmax))
-
-def billing_period_for_ym(billing_ym: str, billing_day: int = BILLING_DAY) -> tuple[dt.date, dt.date]:
-    """
-    billing_ym is the Emporia "billing month" label in YYYY-MM.
-    For billing_day=23: billing_ym=2026-01 means 2025-12-23 .. 2026-01-22
-    """
-    y, m = map(int, billing_ym.split("-"))
-    period_start = dt.date(y, m, 1)
-
-    prev_month = (period_start - dt.timedelta(days=1)).replace(day=1)
-    start = clamp_day(prev_month.year, prev_month.month, billing_day)
-
-    this_billing_day = clamp_day(period_start.year, period_start.month, billing_day)
-    end = this_billing_day - dt.timedelta(days=1)
-
-    return start, end
 
 
 # -------- Get device names from database --------
@@ -371,32 +350,10 @@ def monthly_device_total_for_chart(device_gid: int, months: list[str]) -> pd.Dat
     df = df.rename(columns={"kwh": "kwh_total"})
     return df
 
-# --- Pull kWh from DB (month-filtered) ---
-rv_total = get_device_total_kwh_pref_main(RV_SITES_GID)
-pole_sub_total = get_device_total_kwh_pref_main(POLE_BARN_SUB_GID)
-pole_main_total = get_device_main_kwh(POLE_BARN_MAIN_GID)
-
-airstream_kwh = get_channel_kwh(POLE_BARN_MAIN_GID, "Airstream")
-ryan_kwh = get_channel_kwh(RV_SITES_GID, "Ryan")
-marc_kwh = get_channel_kwh(RV_SITES_GID, "Marc")
-kelly_russ_kwh = get_channel_kwh(RV_SITES_GID, "Kelly & Russ")
-
-# Derived buckets
-kitchen_raw = pole_sub_total - rv_total
-shared_raw = pole_main_total - pole_sub_total - airstream_kwh
-
-kitchen_lounge_kwh = kitchen_raw
-shared_shop_kwh = max(0.0, pole_main_total - pole_sub_total - airstream_kwh)
-
-# --- Calculate charges (math in billing.tenant_charges.py) ---
-results = calculate_tenant_charges(
-    kelly_russ_kwh=kelly_russ_kwh,
-    airstream_kwh=airstream_kwh,
-    ryan_kwh=ryan_kwh,
-    marc_kwh=marc_kwh,
-    kitchen_lounge_kwh=kitchen_lounge_kwh,
-    shared_shop_kwh=shared_shop_kwh,
-)
+# --- Calculate charges (math in billing/compute.py + billing/tenant_charges.py) ---
+_conn = sqlite3.connect(DB_PATH)
+results = tenant_charges_for_period(_conn, period_start, period_end)
+_conn.close()
 
 #Show results
 cols = st.columns(len(results))

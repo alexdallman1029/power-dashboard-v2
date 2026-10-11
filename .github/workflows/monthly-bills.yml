@@ -1,0 +1,46 @@
+name: Monthly tenant bills
+
+on:
+  schedule:
+    - cron: "0 20 23 * *"   # 23rd at 20:00 UTC, after that morning's data pull
+  workflow_dispatch:
+    inputs:
+      send:
+        description: "Actually send texts? (false = dry run, prints messages only)"
+        type: boolean
+        default: false
+      ym:
+        description: "Billing month YYYY-MM (blank = period that just closed)"
+        default: ""
+
+concurrency:
+  group: data-updates
+  cancel-in-progress: false
+
+jobs:
+  bills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Send bills
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+          TENANT_PHONES: ${{ secrets.TENANT_PHONES }}
+        run: |
+          SEND_FLAG=""
+          # Scheduled runs send only once SEND_ENABLED=true is set as a repo variable
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            [ "${{ vars.SEND_ENABLED }}" = "true" ] && SEND_FLAG="--send"
+          else
+            [ "${{ github.event.inputs.send }}" = "true" ] && SEND_FLAG="--send"
+          fi
+          YM_FLAG=""
+          [ -n "${{ github.event.inputs.ym }}" ] && YM_FLAG="--ym ${{ github.event.inputs.ym }}"
+          python -m billing.send_bills $SEND_FLAG $YM_FLAG
