@@ -1,12 +1,12 @@
 name: Utility (SmartHub) pull
 
-# Manual only for now. Once a test run looks right, a daily schedule can be added.
+# Manual for now. Once the numbers match your bills, a monthly schedule can be added.
 on:
   workflow_dispatch:
     inputs:
-      days_back:
-        description: "Days of utility history to pull (start small: 10)"
-        default: "10"
+      months_back:
+        description: "Months of utility history to pull"
+        default: "24"
 
 permissions:
   contents: write
@@ -20,63 +20,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      # Third-party tool that receives the utility login: pinned to a reviewed commit.
-      - name: Fetch electric-usage-downloader (pinned)
-        uses: actions/checkout@v5
-        with:
-          repository: tedpearson/electric-usage-downloader
-          ref: 1bfe76fc68ae8f6758e935489f5f4080e7965294
-          path: .tools/eud
-          persist-credentials: false
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: .tools/eud/go.mod
-          cache: false
-
-      - name: Build downloader
-        run: cd .tools/eud && go build -o "$RUNNER_TEMP/eud" .
-
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-
-      - name: Write config (outside the repo)
+      - name: Pull monthly usage from SmartHub
         env:
           SMARTHUB_USERNAME: ${{ secrets.SMARTHUB_USERNAME }}
           SMARTHUB_PASSWORD: ${{ secrets.SMARTHUB_PASSWORD }}
           SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
           SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
-        run: python ingest/make_smarthub_config.py "$RUNNER_TEMP/smarthub.json"
-
-      - name: Download usage in 40-day windows
-        env:
-          DAYS_BACK: ${{ github.event.inputs.days_back || '10' }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/csv"
-          end=$(date +%F)
-          remaining="$DAYS_BACK"
-          n=0
-          while [ "$remaining" -gt 0 ]; do
-            span=$(( remaining < 40 ? remaining : 40 ))
-            start=$(date -d "$end - $((span - 1)) days" +%F)
-            n=$((n + 1))
-            echo "Window $n: $start to $end"
-            "$RUNNER_TEMP/eud" --config "$RUNNER_TEMP/smarthub.json" \
-              --start "$start" --end "$end" --csv-file "$RUNNER_TEMP/csv/w$n.csv"
-            end=$(date -d "$start - 1 day" +%F)
-            remaining=$(( remaining - span ))
-          done
-
-      - name: Load into database
-        run: python -m ingest.load_smarthub_csv "$RUNNER_TEMP"/csv/*.csv
-
+        run: python -m ingest.pull_smarthub ${{ github.event.inputs.months_back || '24' }}
       - name: Commit updated database
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/energy.sqlite
-          git diff --cached --quiet || git commit -m "Update utility usage data"
+          git diff --cached --quiet || git commit -m "Update utility monthly usage"
           git pull --rebase
           git push
