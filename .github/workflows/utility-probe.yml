@@ -7,6 +7,9 @@ on:
       bill_date:
         description: "Bill date for the PDF layout check, as YYYY_M_D with no leading zeros"
         default: "2026_10_5"
+      bill_file:
+        description: "Optional: exact file name from the view-bill link, without .pdf (like 2026_10_5_1234567)"
+        default: ""
 
 permissions:
   contents: read
@@ -38,4 +41,4 @@ jobs:
           SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
         run: |
           pip install pypdf
-          python -m ingest.probe_smarthub_pdf "${{ github.event.inputs.bill_date || '2026_10_5' }}"
+          python -m ingest.probe_smarthub_pdf "${{ github.event.inputs.bill_date || '2026_10_5' }}" "${{ github.event.inputs.bill_file }}"
