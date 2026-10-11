@@ -70,6 +70,22 @@ def poll(token, timeframe, start, end):
     print("  still PENDING after 15 tries")
 
 
+SHOW_VALUES = {"timeFrame", "unitOfMeasure", "hasDaily", "hasHourly", "industry", "type", "estimatedSeries", "editedSeries"}
+
+
+def shape(obj, depth=0, key=""):
+    """Structure only: types and sizes, plus a few harmless flags. No readings or IDs."""
+    if depth > 5:
+        return "..."
+    if isinstance(obj, dict):
+        return {mask(str(k)): shape(v, depth + 1, str(k)) for k, v in list(obj.items())[:12]}
+    if isinstance(obj, list):
+        return [f"{len(obj)} items", shape(obj[0], depth + 1, key)] if obj else ["empty list"]
+    if key in SHOW_VALUES:
+        return repr(obj)
+    return type(obj).__name__
+
+
 def describe(label, result):
     print(f"\n== {label}")
     if not result:
@@ -89,6 +105,8 @@ def describe(label, result):
         for e in entries:
             series = e.get("series") or []
             print(f"    type={e.get('type')!r} other keys={sorted(set(e) - {'type', 'series'})} series={len(series)}")
+            for k in sorted(set(e) - {"type", "series", "accountNumber", "serviceLocationNumber"}):
+                print(f"      [{k}] -> {json.dumps(shape(e[k], 0, k))[:700]}")
             for s in series:
                 pts = s.get("data") or []
                 span = ""
@@ -106,7 +124,6 @@ def main():
     now = dt.datetime.now(dt.timezone.utc).replace(second=0, microsecond=0)
     for label, tf, days_start, days_end in [
         ("HOURLY, last 10 days", "HOURLY", 10, 0),
-        ("HOURLY, 40-20 days ago", "HOURLY", 40, 20),
         ("DAILY, last 40 days", "DAILY", 40, 0),
         ("MONTHLY, last 400 days", "MONTHLY", 400, 0),
     ]:
