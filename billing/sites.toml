@@ -1,0 +1,83 @@
+# ============================================================
+#  FishDog billing settings  -- edit this file to change who is
+#  billed and how shared power is split. Nothing else needs to change.
+#
+#  After editing: commit the change on GitHub (pencil icon -> Commit).
+#  The dashboard and the monthly texts both read this file.
+# ============================================================
+
+[rates]
+rate_per_kwh = 0.13   # $ per kWh
+monthly_fee  = 5.43   # flat fee added to each occupied site's bill
+base_kwh     = 45.0   # fixed base load shared each month (before dividing)
+
+# ------------------------------------------------------------
+#  HOW SHARED POWER IS SPLIT
+#    Base load + shared shop : divided by ALL people (billed + unbilled)
+#    Kitchen/lounge          : divided by billed people only
+#  Each site pays (its people) x (the per-person share).
+#  A vacant site (people = 0) is not billed and not counted, so
+#  everyone else's share goes up automatically.
+# ------------------------------------------------------------
+
+# ------------------------------------------------------------
+#  PEOPLE HISTORY
+#  Each entry means: "starting with billing month `from`, this many people".
+#  The newest entry whose `from` is on/before a month applies to that month.
+#  Billing month = the month the cycle ENDS in (the 23rd-22nd cycle ending
+#  Jan 22 is "2026-01").
+#
+#  To change going forward: add one line to the site, e.g.
+#      { from = "2026-11", people = 0 },     # site becomes vacant in Nov bill
+#  To fix history: edit or add an earlier `from` line. Past months recalc.
+# ------------------------------------------------------------
+
+# People who use base/shop power but are not billed (e.g. the owners).
+[unbilled_residents]
+history = [
+  { from = "2025-01", people = 2 },
+]
+
+# ------------------------------------------------------------
+#  SITES
+#  name      : what appears on the dashboard and in texts
+#  greeting  : how the text addresses them ("Hi <greeting>, ...")
+#  device_gid / channel : the Emporia meter for this site (the channel name
+#                          as it appears in Emporia - NOT the display name)
+# ------------------------------------------------------------
+
+[[sites]]
+name = "East Site"
+greeting = "Kelly and Russ"
+device_gid = 417380
+channel = "Kelly & Russ"
+history = [
+  { from = "2025-01", people = 2 },
+]
+
+[[sites]]
+name = "West Site"
+greeting = "Ryan"
+device_gid = 417380
+channel = "Ryan"
+history = [
+  { from = "2025-01", people = 1 },
+]
+
+[[sites]]
+name = "Middle Site"
+greeting = "Marc"
+device_gid = 417380
+channel = "Marc"
+history = [
+  { from = "2025-01", people = 1 },
+]
+
+[[sites]]
+name = "Airstream"
+greeting = "there"
+device_gid = 422491
+channel = "Airstream"
+history = [
+  { from = "2025-01", people = 1 },
+]

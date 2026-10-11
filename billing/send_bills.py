@@ -7,8 +7,8 @@ Usage:
 
 Environment (only needed with --send):
     TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
-    TENANT_PHONES   JSON, e.g. {"Ryan": "+15551234567", "Marc": "+1555..."}
-                    Keys must match the "Tenant" names from tenant_charges.py.
+    TENANT_PHONES   JSON, e.g. {"West Site": "+15551234567", "East Site": "+1555..."}
+                    Keys must match the site names in billing/sites.toml.
 """
 from __future__ import annotations
 
@@ -22,12 +22,10 @@ import sys
 import requests
 
 from billing.compute import tenant_charges_for_ym
+from billing.config import load_config
 from billing.period import billing_period_for_ym, billing_ym_for_day
 
 DB_PATH = "data/energy.sqlite"
-
-# How to address each tenant in the text (defaults to the first word of the name)
-GREETING = {"Kelly & Russ": "Kelly and Russ", "Airstream": "there"}
 
 MESSAGE = (
     "Hi {first}, your electric bill for {start} - {end} is ${amount:,.2f} "
@@ -37,6 +35,7 @@ MESSAGE = (
 
 def build_messages(ym: str) -> list[dict]:
     start, end = billing_period_for_ym(ym)
+    greetings = {site.name: site.greeting for site in load_config().sites}
     conn = sqlite3.connect(DB_PATH)
     try:
         last_day = conn.execute("select max(day) from usage_daily").fetchone()[0]
@@ -58,7 +57,7 @@ def build_messages(ym: str) -> list[dict]:
                 "tenant": name,
                 "amount": float(row["Charge ($)"]),
                 "body": MESSAGE.format(
-                    first=GREETING.get(name, name.split(" ")[0]),
+                    first=greetings[name],
                     start=f"{start:%b} {start.day}",
                     end=f"{end:%b} {end.day}",
                     amount=float(row["Charge ($)"]),

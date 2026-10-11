@@ -7,8 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from PIL import Image
 
-from billing.tenant_charges import calculate_tenant_charges
-from billing.compute import tenant_charges_for_period
+from billing.compute import tenant_charges_for_ym
 from billing.period import BILLING_DAY, billing_period_for_ym
 
 
@@ -350,9 +349,9 @@ def monthly_device_total_for_chart(device_gid: int, months: list[str]) -> pd.Dat
     df = df.rename(columns={"kwh": "kwh_total"})
     return df
 
-# --- Calculate charges (math in billing/compute.py + billing/tenant_charges.py) ---
+# --- Calculate charges (math in billing/compute.py; people/sites in billing/sites.toml) ---
 _conn = sqlite3.connect(DB_PATH)
-results = tenant_charges_for_period(_conn, period_start, period_end)
+results = tenant_charges_for_ym(_conn, month_ym)
 _conn.close()
 
 #Show results
@@ -374,45 +373,14 @@ st.subheader("Monthly Power Usage over Time")
 months_for_chart = [m for m in raw_months if m <= month_ym][:12]
 months_for_chart = list(reversed(months_for_chart))  # oldest -> newest
 
-# ---- monthly kWh inputs (these match the arguments you already pass to calculate_tenant_charges) ----
-m_ryan = monthly_channel_kwh(RV_SITES_GID, "Ryan", months_for_chart).rename(columns={"kwh": "ryan_kwh"})
-m_marc = monthly_channel_kwh(RV_SITES_GID, "Marc", months_for_chart).rename(columns={"kwh": "marc_kwh"})
-m_kelr = monthly_channel_kwh(RV_SITES_GID, "Kelly & Russ", months_for_chart).rename(columns={"kwh": "kelly_russ_kwh"})
-m_air  = monthly_channel_kwh(POLE_BARN_MAIN_GID, "Airstream", months_for_chart).rename(columns={"kwh": "airstream_kwh"})
-
-m_rv_total   = monthly_device_total_pref_main(RV_SITES_GID, months_for_chart).rename(columns={"kwh": "rv_total"})
-m_pole_sub   = monthly_device_total_pref_main(POLE_BARN_SUB_GID, months_for_chart).rename(columns={"kwh": "pole_sub_total"})
-m_pole_main0 = monthly_device_main_kwh(POLE_BARN_MAIN_GID, months_for_chart).rename(columns={"kwh": "pole_main_total"})
-
-# ---- derive Kitchen/Lounge + Shared Shop monthly kWh exactly like your single-month math ----
-base = pd.DataFrame({"ym": months_for_chart})
-m = (
-    base.merge(m_ryan, on="ym")
-        .merge(m_marc, on="ym")
-        .merge(m_kelr, on="ym")
-        .merge(m_air, on="ym")
-        .merge(m_rv_total, on="ym")
-        .merge(m_pole_sub, on="ym")
-        .merge(m_pole_main0, on="ym")
-)
-
-m["kitchen_lounge_kwh"] = (m["pole_sub_total"] - m["rv_total"]).clip(lower=0.0)
-m["shared_shop_kwh"] = (m["pole_main_total"] - m["pole_sub_total"] - m["airstream_kwh"]).clip(lower=0.0)
-
-# ---- Compute monthly $ by reusing calculate_tenant_charges for each month ----
+# ---- monthly charges, same shared calculation as the header above ----
+_conn = sqlite3.connect(DB_PATH)
 rows = []
-for _, r in m.iterrows():
-    monthly_results = calculate_tenant_charges(
-        kelly_russ_kwh=float(r["kelly_russ_kwh"]),
-        airstream_kwh=float(r["airstream_kwh"]),
-        ryan_kwh=float(r["ryan_kwh"]),
-        marc_kwh=float(r["marc_kwh"]),
-        kitchen_lounge_kwh=float(r["kitchen_lounge_kwh"]),
-        shared_shop_kwh=float(r["shared_shop_kwh"]),
-    ).copy()
-
-    monthly_results["ym"] = r["ym"]
-    rows.append(monthly_results)
+for _ym in months_for_chart:
+    _df = tenant_charges_for_ym(_conn, _ym).copy()
+    _df["ym"] = _ym
+    rows.append(_df)
+_conn.close()
 
 monthly_all = pd.concat(rows, ignore_index=True)
 
