@@ -7,7 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from PIL import Image
 
-from billing.compute import tenant_charges_for_ym
+from billing.compute import tenant_charges_for_ym, vacant_site_usage
 from billing.period import BILLING_DAY, billing_period_for_ym
 
 
@@ -352,7 +352,14 @@ def monthly_device_total_for_chart(device_gid: int, months: list[str]) -> pd.Dat
 # --- Calculate charges (math in billing/compute.py; people/sites in billing/sites.toml) ---
 _conn = sqlite3.connect(DB_PATH)
 results = tenant_charges_for_ym(_conn, month_ym)
+_vacant_usage = vacant_site_usage(_conn, month_ym)
 _conn.close()
+
+for _site, _kwh in _vacant_usage.items():
+    st.warning(
+        f"{_site} is marked vacant but its meter used {_kwh:,.1f} kWh this billing period. "
+        "That usage was added to the shared shop. Worth checking why."
+    )
 
 #Show results
 cols = st.columns(len(results))

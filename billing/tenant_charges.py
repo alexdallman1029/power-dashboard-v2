@@ -25,6 +25,8 @@ def calculate_site_charges(
     occupied = {n: p for n, p in site_people.items() if p > 0}
     billed_people = sum(occupied.values())
     all_people = billed_people + unbilled_people
+    if billed_people == 0:
+        return pd.DataFrame(columns=["Tenant", "kWh (calc)", "Charge ($)"])
 
     rows = []
     for name, people in occupied.items():

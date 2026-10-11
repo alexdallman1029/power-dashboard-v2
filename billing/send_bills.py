@@ -21,7 +21,7 @@ import sys
 
 import requests
 
-from billing.compute import tenant_charges_for_ym
+from billing.compute import tenant_charges_for_ym, vacant_site_usage
 from billing.config import load_config
 from billing.period import billing_period_for_ym, billing_ym_for_day
 
@@ -40,6 +40,8 @@ def build_messages(ym: str) -> list[dict]:
     try:
         last_day = conn.execute("select max(day) from usage_daily").fetchone()[0]
         results = tenant_charges_for_ym(conn, ym)
+        for site, kwh in vacant_site_usage(conn, ym).items():
+            print(f"::warning::{site} is vacant but metered {kwh:,.1f} kWh (added to shared shop)")
     finally:
         conn.close()
 
