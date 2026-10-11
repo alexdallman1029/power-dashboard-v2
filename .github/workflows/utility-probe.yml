@@ -21,4 +21,8 @@ jobs:
           SMARTHUB_PASSWORD: ${{ secrets.SMARTHUB_PASSWORD }}
           SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
           SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
-        run: python ingest/probe_smarthub.py
+        run: |
+          python ingest/probe_smarthub.py
+          echo
+          echo "===== BILLING HISTORY SHAPE ====="
+          python -m ingest.probe_smarthub_billing

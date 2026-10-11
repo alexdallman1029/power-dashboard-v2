@@ -71,6 +71,28 @@ def poll_usage(token: str, timeframe: str, start: dt.datetime, end: dt.datetime)
     raise RuntimeError("SmartHub data still PENDING after 15 tries")
 
 
+def _get(url: str, headers: dict) -> tuple[int, bytes]:
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def billing_overview(token: str) -> dict:
+    """The bill list behind SmartHub's Billing page (dates, amounts, adjustments, totals)."""
+    user = os.environ["SMARTHUB_USERNAME"]
+    acct = urllib.parse.quote(os.environ["SMARTHUB_ACCOUNT"].strip())
+    status, raw = _get(
+        f"{API}/services/secured/billing/history/overview?acctNbr={acct}",
+        {"authority": HOST, "authorization": "Bearer " + token, "x-nisc-smarthub-username": user},
+    )
+    if status != 200:
+        raise RuntimeError(f"SmartHub billing overview returned HTTP {status}")
+    return json.loads(raw)
+
+
 def monthly_kwh(data: dict) -> list[tuple[str, float]]:
     """(month 'YYYY-MM', kWh) pairs from a MONTHLY poll response.
 
