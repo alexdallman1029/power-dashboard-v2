@@ -3,6 +3,10 @@ name: Utility (SmartHub) probe
 # Diagnostic only: prints the structure of SmartHub's responses (no tokens or readings).
 on:
   workflow_dispatch:
+    inputs:
+      bill_date:
+        description: "Bill date for the PDF layout check, as YYYY_M_D with no leading zeros"
+        default: "2026_10_5"
 
 permissions:
   contents: read
@@ -26,3 +30,12 @@ jobs:
           echo
           echo "===== BILLING HISTORY SHAPE ====="
           python -m ingest.probe_smarthub_billing
+      - name: Bill PDF layout (digits masked)
+        if: always()
+        env:
+          SMARTHUB_USERNAME: ${{ secrets.SMARTHUB_USERNAME }}
+          SMARTHUB_PASSWORD: ${{ secrets.SMARTHUB_PASSWORD }}
+          SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
+        run: |
+          pip install pypdf
+          python -m ingest.probe_smarthub_pdf "${{ github.event.inputs.bill_date || '2026_10_5' }}"
