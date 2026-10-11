@@ -17,8 +17,8 @@ History = tuple[tuple[str, int], ...]  # (from_ym, people), sorted by from_ym
 class Site:
     name: str
     greeting: str
-    device_gid: int
-    channel: str
+    device_gid: int | None  # None = no Emporia meter (yet)
+    channel: str | None
     history: History
 
 
@@ -70,8 +70,8 @@ def load_config(path: Path = CONFIG_PATH) -> BillingConfig:
         Site(
             name=s["name"],
             greeting=s.get("greeting") or s["name"],
-            device_gid=int(s["device_gid"]),
-            channel=s["channel"],
+            device_gid=int(s["device_gid"]) if "device_gid" in s else None,
+            channel=s.get("channel"),
             history=_parse_history(s.get("history"), f'site "{s["name"]}"'),
         )
         for s in raw["sites"]

@@ -47,7 +47,9 @@ history = [
 #  name      : what appears on the dashboard and in texts
 #  greeting  : how the text addresses them ("Hi <greeting>, ...")
 #  device_gid / channel : the Emporia meter for this site (the channel name
-#                          as it appears in Emporia - NOT the display name)
+#                          as it appears in Emporia - NOT the display name).
+#                          Leave both out for a site with no meter yet: it still
+#                          shares the pools, with no usage of its own.
 # ------------------------------------------------------------
 
 [[sites]]
@@ -66,6 +68,8 @@ device_gid = 417380
 channel = "Ryan"
 history = [
   { from = "2025-01", people = 1 },
+  { from = "2026-07", people = 0 },   # vacant
+  { from = "2026-09", people = 2 },   # new tenants
 ]
 
 [[sites]]
@@ -75,6 +79,7 @@ device_gid = 417380
 channel = "Marc"
 history = [
   { from = "2025-01", people = 1 },
+  { from = "2026-06", people = 0 },   # vacant
 ]
 
 [[sites]]
@@ -84,4 +89,5 @@ device_gid = 422491
 channel = "Airstream"
 history = [
   { from = "2025-01", people = 1 },
+  { from = "2026-08", people = 0 },   # unoccupied
 ]

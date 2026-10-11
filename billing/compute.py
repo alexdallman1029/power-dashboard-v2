@@ -58,7 +58,11 @@ def _site_kwh(conn: sqlite3.Connection, billing_ym: str) -> dict[str, float]:
     cfg = load_config()
     start, end = billing_period_for_ym(billing_ym)
     return {
-        site.name: _channel_kwh(conn, site.device_gid, site.channel, start.isoformat(), end.isoformat())
+        site.name: (
+            _channel_kwh(conn, site.device_gid, site.channel, start.isoformat(), end.isoformat())
+            if site.device_gid is not None and site.channel
+            else 0.0  # no meter yet: shares the pools but has no usage of its own
+        )
         for site in cfg.sites
     }
 
