@@ -91,3 +91,12 @@ history = [
   { from = "2025-01", people = 1 },
   { from = "2026-08", people = 0 },   # unoccupied
 ]
+
+# No Emporia meter yet: it takes its share of the pools (and pays the fee) but has no
+# usage of its own. When it gets a meter, add device_gid and channel lines here.
+[[sites]]
+name = "Yurt"
+greeting = "there"
+history = [
+  { from = "2026-08", people = 1 },
+]
