@@ -36,6 +36,19 @@ vacant_alert_kwh = 5.0
 #  To fix history: edit or add an earlier `from` line. Past months recalc.
 # ------------------------------------------------------------
 
+# ------------------------------------------------------------
+#  UTILITY (Blachly-Lane) BILLS
+#  house_meter          : the utility meter number for your house (not billed to
+#                         tenants). Every other meter on the bill is the farm meter.
+#  farm_emporia_devices : Emporia device IDs whose MAIN channel sits behind the farm
+#                         meter (pole barn main, grow barn). The dashboard compares
+#                         their total with the farm meter's kWh; the difference is
+#                         power Emporia is not seeing.
+# ------------------------------------------------------------
+[utility]
+house_meter = "R628"
+farm_emporia_devices = [422491, 432079]
+
 # People who use base/shop power but are not billed (e.g. the owners).
 [unbilled_residents]
 history = [

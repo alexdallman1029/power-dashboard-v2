@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 
 from billing.compute import tenant_charges_for_ym, vacant_site_usage
+from billing.utility import has_bill_tables, reconcile
 from billing.period import BILLING_DAY, billing_period_for_ym
 
 
@@ -367,11 +368,11 @@ cols = st.columns(len(results))
 for col, (_, row) in zip(cols, results.iterrows()):
     with col:
         st.metric(
-            label=row[0],
-            value=f"${row[2]:,.2f}",
+            label=row["Tenant"],
+            value=f"${row['Charge ($)']:,.2f}",
             delta=None
         )
-        st.caption(f"{row[1]:,.1f} kWh")
+        st.caption(f"{row['kWh (calc)']:,.1f} kWh")
 
 
 st.subheader("Monthly Power Usage over Time")
@@ -453,7 +454,7 @@ fig_tenant.update_layout(
     margin=dict(l=10, r=10, t=10, b=10),
 )
 
-st.plotly_chart(fig_tenant, use_container_width=True)
+st.plotly_chart(fig_tenant, width="stretch")
 
 st.divider()
 
@@ -552,7 +553,7 @@ def render_device_section(device_gid: int):
         margin=dict(l=10, r=10, t=10, b=10),
     )
 
-    st.plotly_chart(fig_dev, use_container_width=True)
+    st.plotly_chart(fig_dev, width="stretch")
 
 
     # ---- Balance like Emporia  ----
@@ -590,7 +591,7 @@ def render_device_section(device_gid: int):
     channels_df = channels_df[["Channel", "kWh (billing period)"]]
 
     with st.expander("Channel details", expanded=False):
-        st.dataframe(channels_df, use_container_width=True, hide_index=True)
+        st.dataframe(channels_df, width="stretch", hide_index=True)
 
 
     channels_df = query_df(
@@ -637,4 +638,70 @@ with col_left:
 with col_right:
     render_device_section(POLE_BARN_SUB)
 
+st.divider()
 
+# -------- Utility bills (Blachly-Lane) vs Emporia --------
+st.header("Utility Bills (Blachly-Lane)")
+
+_conn = sqlite3.connect(DB_PATH)
+try:
+    _rec = reconcile(_conn) if has_bill_tables(_conn) else None
+finally:
+    _conn.close()
+
+if _rec is None or _rec.empty:
+    st.info("No utility bills loaded yet. Run the 'Utility (SmartHub) pull' workflow on GitHub.")
+else:
+    _rec = _rec.sort_values("Bill date").reset_index(drop=True)
+    _latest = _rec.iloc[-1]
+    st.caption(
+        f"Latest bill: {_latest['Bill date']} (meter readings {_latest['Read from']} to {_latest['Read to']}, "
+        f"{int(_latest['Days'])} days)"
+    )
+    u1, u2, u3, u4 = st.columns(4)
+    u1.metric("Farm meter kWh", f"{_latest['Farm kWh']:,.0f}")
+    u2.metric("Farm meter bill", f"${_latest['Farm $']:,.2f}")
+    u3.metric("House bill", f"${_latest['House $']:,.2f}")
+    u4.metric(
+        "Not seen by Emporia",
+        f"{_latest['Unaccounted kWh']:,.0f} kWh",
+        delta=f"{_latest['Unaccounted %']:.1f}%",
+        delta_color="off",
+    )
+    st.caption(
+        "Farm meter = every utility meter except the house. Emporia = pole barn main + grow barn over the "
+        "same meter-reading dates. A small gap is normal; a large one means power Emporia is missing."
+    )
+
+    _recent = _rec.tail(12)
+    _chart = _recent.melt(
+        id_vars=["Bill date"], value_vars=["Farm kWh", "Emporia kWh"], var_name="Source", value_name="kWh"
+    )
+    _fig = px.bar(
+        _chart, x="Bill date", y="kWh", color="Source", barmode="group",
+        color_discrete_map={"Farm kWh": PALETTE["color4"], "Emporia kWh": PALETTE["color2"]},
+    )
+    _fig.update_layout(xaxis_title="", yaxis_title="kWh per bill", margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(_fig, width="stretch")
+
+    if not _rec["Checked"].all():
+        st.warning("Some bills below did not add up when read from the PDF; treat their dollar figures with care.")
+
+    with st.expander("All bills"):
+        _show = _rec.sort_values("Bill date", ascending=False).copy()
+        _show["Checked"] = _show["Checked"].map({True: "yes", False: "no"})
+        st.dataframe(
+            _show,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Farm kWh": st.column_config.NumberColumn(format="%.0f"),
+                "House kWh": st.column_config.NumberColumn(format="%.0f"),
+                "Emporia kWh": st.column_config.NumberColumn(format="%.0f"),
+                "Unaccounted kWh": st.column_config.NumberColumn(format="%.0f"),
+                "Unaccounted %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Farm $": st.column_config.NumberColumn(format="$%.2f"),
+                "House $": st.column_config.NumberColumn(format="$%.2f"),
+                "Farm $/kWh": st.column_config.NumberColumn(format="$%.3f"),
+            },
+        )

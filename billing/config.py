@@ -28,6 +28,8 @@ class BillingConfig:
     monthly_fee: float
     base_kwh: float
     vacant_alert_kwh: float
+    house_meter: str
+    farm_emporia_devices: tuple[int, ...]
     unbilled_history: History
     sites: tuple[Site, ...]
 
@@ -85,6 +87,8 @@ def load_config(path: Path = CONFIG_PATH) -> BillingConfig:
         monthly_fee=float(rates["monthly_fee"]),
         base_kwh=float(rates["base_kwh"]),
         vacant_alert_kwh=float(rates.get("vacant_alert_kwh", 5.0)),
+        house_meter=str(raw.get("utility", {}).get("house_meter", "")),
+        farm_emporia_devices=tuple(int(g) for g in raw.get("utility", {}).get("farm_emporia_devices", [])),
         unbilled_history=_parse_history(
             raw.get("unbilled_residents", {}).get("history", [{"from": "2000-01", "people": 0}]),
             "unbilled_residents",
