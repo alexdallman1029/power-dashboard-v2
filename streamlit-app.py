@@ -5,7 +5,6 @@ import datetime as dt
 import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from PIL import Image
 
 from billing.compute import tenant_charges_for_ym, vacant_site_usage
 from billing.utility import has_bill_tables, reconcile
@@ -16,14 +15,12 @@ from billing.period import BILLING_DAY, billing_period_for_ym
 #---------------------------
 # Title and Header
 #---------------------------
-logo = Image.open("assets/fishdog-24.png")
 st.set_page_config(page_title="FishDog Farm Dashboard", layout="wide")
 
-#Center logo and title
+#Center title
 left, mid, right = st.columns([3, 2, 3])
 
 with mid:
-    st.image(logo, width=350)
     st.title("Data Dashboard")
 
 #---------------------------
