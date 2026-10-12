@@ -1,22 +1,17 @@
 """Diagnostic: download one SmartHub bill PDF with our login and print its LAYOUT.
 
-    python -m ingest.probe_smarthub_pdf 2026_10_5 [2026_10_5_ACCOUNT]
+    python -m ingest.probe_smarthub_pdf [index]      # 0 = newest bill (default)
 
-The optional second argument is the exact file-name stem from the "view bill" link; when
-given, it is used instead of building the name from the SMARTHUB_ACCOUNT secret, which
-also tells us whether that secret matches the account in the link.
-
-Every digit in printed text is masked as '#', so amounts and numbers are not printed.
-Names or street names on the bill may still appear: read the output before sharing it.
+Picks the bill from the billing-history list (the list supplies the timestamp and uuid
+SmartHub requires). Every digit in printed text is masked as '#', so amounts and numbers
+are not printed. Names or street names on the bill may still appear: read the output
+before sharing it.
 """
 import io
-import os
 import re
 import sys
-import time
-import uuid
 
-from shared.smarthub import API, HOST, _get, login
+from shared.smarthub import billing_overview, fetch_bill_pdf, login
 
 
 def masked_lines(text: str):
@@ -27,36 +22,19 @@ def masked_lines(text: str):
         yield re.sub(r"\d", "#", line)
 
 
-def main(bill_date: str, stem: str = "") -> None:
+def main(index: int = 0) -> None:
     token = login()
-    secret_acct = os.environ["SMARTHUB_ACCOUNT"].strip()
-    if stem:
-        acct = stem.rsplit("_", 1)[-1]
-        print(f"SMARTHUB_ACCOUNT secret matches the account in the link: {secret_acct == acct} "
-              f"(secret has {len(secret_acct)} characters, link has {len(acct)})")
-    else:
-        acct, stem = secret_acct, f"{bill_date}_{secret_acct}"
-
-    headers = {
-        "authority": HOST,
-        "authorization": "Bearer " + token,
-        "x-nisc-smarthub-username": os.environ["SMARTHUB_USERNAME"],
-    }
-    base = f"{API}/services/secured/billPdfService/{stem}.pdf"
-    full = f"?account={acct}&timestamp={int(time.time() * 1000)}&uuid={uuid.uuid4()}&systemOfRecord=UTILITY"
-    variants = {"full query": base + full, "account only": base + f"?account={acct}", "no query": base}
-
-    body = b""
-    for name, url in variants.items():
-        status, b = _get(url, headers)
-        print(f"PDF request ({name}): HTTP {status}, {len(b)} bytes, starts with {b[:5]!r}")
-        if len(b) < 500 and not b.lstrip().startswith(b"<"):
-            print("  short message from server (digits masked):", re.sub(r"\d", "#", b.decode("utf-8", "replace")))
-        if status == 200 and b.startswith(b"%PDF"):
-            body = b
-            break
-    if not body:
-        print("No variant returned a PDF.")
+    bills = sorted(
+        (b for b in billing_overview(token) if b.get("showViewBillLink")),
+        key=lambda b: b["billingDateTimestamp"],
+        reverse=True,
+    )
+    print(f"{len(bills)} bills have a view-bill link; trying number {index} (0 = newest)")
+    status, body = fetch_bill_pdf(token, bills[index])
+    print(f"PDF request: HTTP {status}, {len(body)} bytes, starts with {body[:5]!r}")
+    if status != 200 or not body.startswith(b"%PDF"):
+        if len(body) < 500 and not body.lstrip().startswith(b"<"):
+            print("  short message from server (digits masked):", re.sub(r"\d", "#", body.decode("utf-8", "replace")))
         return
 
     from pypdf import PdfReader
@@ -66,9 +44,9 @@ def main(bill_date: str, stem: str = "") -> None:
     for i, page in enumerate(reader.pages, 1):
         text = page.extract_text() or ""
         print(f"\n===== PAGE {i}: {len(text)} characters of text =====")
-        for line in list(masked_lines(text))[:120]:
+        for line in list(masked_lines(text))[:150]:
             print(line)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "2026_10_5", sys.argv[2] if len(sys.argv) > 2 else "")
+    main(int(sys.argv[1]) if len(sys.argv) > 1 else 0)

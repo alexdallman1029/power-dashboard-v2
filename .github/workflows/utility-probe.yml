@@ -4,12 +4,9 @@ name: Utility (SmartHub) probe
 on:
   workflow_dispatch:
     inputs:
-      bill_date:
-        description: "Bill date for the PDF layout check, as YYYY_M_D with no leading zeros"
-        default: "2026_10_5"
-      bill_file:
-        description: "Optional: exact file name from the view-bill link, without .pdf (like 2026_10_5_1234567)"
-        default: ""
+      bill_index:
+        description: "Which bill for the PDF layout check: 0 = newest, 1 = the one before, ..."
+        default: "0"
 
 permissions:
   contents: read
@@ -43,6 +40,7 @@ jobs:
           SMARTHUB_USERNAME: ${{ secrets.SMARTHUB_USERNAME }}
           SMARTHUB_PASSWORD: ${{ secrets.SMARTHUB_PASSWORD }}
           SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
+          SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
         run: |
           pip install pypdf
-          python -m ingest.probe_smarthub_pdf "${{ github.event.inputs.bill_date || '2026_10_5' }}" "${{ github.event.inputs.bill_file }}"
+          python -m ingest.probe_smarthub_pdf "${{ github.event.inputs.bill_index || '0' }}"

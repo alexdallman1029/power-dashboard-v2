@@ -13,6 +13,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from zoneinfo import ZoneInfo
+
 API = "https://blachlylane.smarthub.coop"
 HOST = "blachlylane.smarthub.coop"
 
@@ -91,6 +93,37 @@ def billing_overview(token: str) -> dict:
     if status != 200:
         raise RuntimeError(f"SmartHub billing overview returned HTTP {status}")
     return json.loads(raw)
+
+
+PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+def bill_pdf_url(bill: dict) -> str:
+    """Address of one bill's PDF, built from a row of the billing-history list.
+
+    The file name is the bill date (Pacific time, no leading zeros) plus the account
+    number. `timestamp` and `uuid` come from the list row itself (billingDateTimestamp
+    and billProcessUuid); SmartHub rejects made-up values.
+    """
+    ts = bill["billingDateTimestamp"]
+    d = dt.datetime.fromtimestamp(ts / 1000, dt.timezone.utc).astimezone(PACIFIC)
+    acct = bill["acctNbr"]
+    return (
+        f"{API}/services/secured/billPdfService/{d.year}_{d.month}_{d.day}_{acct}.pdf"
+        f"?account={acct}&timestamp={ts}&uuid={bill['billProcessUuid']}"
+        f"&systemOfRecord={bill.get('systemOfRecord', 'UTILITY')}"
+    )
+
+
+def fetch_bill_pdf(token: str, bill: dict) -> tuple[int, bytes]:
+    return _get(
+        bill_pdf_url(bill),
+        {
+            "authority": HOST,
+            "authorization": "Bearer " + token,
+            "x-nisc-smarthub-username": os.environ["SMARTHUB_USERNAME"],
+        },
+    )
 
 
 def monthly_kwh(data: dict) -> list[tuple[str, float]]:
