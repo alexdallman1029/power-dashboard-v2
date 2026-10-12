@@ -185,6 +185,25 @@ def cycle_vs_previous(conn: sqlite3.Connection, gid: int, ym: str) -> pd.DataFra
     return pd.concat([prev, cur], ignore_index=True)
 
 
+def device_monthly(conn: sqlite3.Connection, gid: int, months: list[str]) -> pd.DataFrame:
+    """kWh per billing month for one device (its Main channel, else the sum of subchannels)."""
+    if not months:
+        return pd.DataFrame(columns=["ym", "kwh"])
+    ym = (
+        "case when cast(strftime('%d', day) as integer) >= 23 then strftime('%Y-%m', date(day, '+1 month')) "
+        "else strftime('%Y-%m', day) end"
+    )
+    df = pd.read_sql_query(
+        f"select {ym} as ym, sum(case when channel_num = 0 then kwh else 0 end) as main, "
+        f"sum(case when channel_num != 0 then kwh else 0 end) as subs "
+        f"from usage_daily where device_gid = ? group by ym",
+        conn,
+        params=(int(gid),),
+    )
+    df["kwh"] = df["main"].where(df["main"] > 0, df["subs"])
+    return pd.DataFrame({"ym": months}).merge(df[["ym", "kwh"]], on="ym", how="left").fillna({"kwh": 0.0})
+
+
 # ----------------------------------------------------------- utility bills
 
 def bill_list(conn: sqlite3.Connection) -> pd.DataFrame:

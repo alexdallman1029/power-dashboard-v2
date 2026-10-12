@@ -40,7 +40,7 @@ SEQUENTIAL = ["#0d366b", "#184f95", "#256abf", "#3987e5", "#6da7ec", "#9ec5f4"]
 def _base(fig: go.Figure, height: int = 340, legend: bool = True) -> go.Figure:
     fig.update_layout(
         height=height,
-        margin=dict(l=8, r=8, t=28 if legend else 8, b=8),
+        margin=dict(l=8, r=16, t=28 if legend else 8, b=8, autoexpand=True),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family=FONT, color=INK2, size=13),
@@ -48,8 +48,9 @@ def _base(fig: go.Figure, height: int = 340, legend: bool = True) -> go.Figure:
         legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0, title_text="", font=dict(color=INK2), traceorder="normal"),
         hoverlabel=dict(bgcolor="#1a1a19", bordercolor=AXIS, font=dict(family=FONT, color=INK)),
     )
-    fig.update_xaxes(showgrid=False, linecolor=AXIS, tickfont=dict(color=MUTED), title_font=dict(color=MUTED), zeroline=False)
-    fig.update_yaxes(gridcolor=GRID, gridwidth=1, zeroline=False, tickfont=dict(color=MUTED), title_font=dict(color=MUTED))
+    # automargin makes room for tick labels and axis titles so the browser never clips them
+    fig.update_xaxes(showgrid=False, linecolor=AXIS, tickfont=dict(color=MUTED), title_font=dict(color=MUTED), zeroline=False, automargin=True)
+    fig.update_yaxes(gridcolor=GRID, gridwidth=1, zeroline=False, tickfont=dict(color=MUTED), title_font=dict(color=MUTED), automargin=True)
     return fig
 
 
@@ -248,3 +249,19 @@ def coverage_chart(rec: pd.DataFrame) -> go.Figure:
                        yshift=14, font=dict(color=MUTED, size=11))
     fig.update_yaxes(title_text="% of farm-meter kWh", ticksuffix="%", range=[95, 105])
     return _base(fig, height=280, legend=False)
+
+
+def monthly_bar_chart(months: list[str], values: list[float], unit: str = "kWh") -> go.Figure:
+    """A simple one-series monthly column chart (one series: no legend, value labels on top)."""
+    labels = pd.to_datetime(pd.Series(months) + "-01").dt.strftime("%b %y")
+    fig = go.Figure(
+        go.Bar(
+            x=labels, y=values, marker=dict(color=ACCENT, line=dict(width=0)),
+            text=[f"{v:,.0f}" for v in values], textposition="outside", cliponaxis=False,
+            textfont=dict(color=INK2, size=11),
+            hovertemplate="<b>%{x}</b><br>%{y:,.1f} " + unit + "<extra></extra>",
+        )
+    )
+    fig.update_layout(bargap=0.5, uniformtext_minsize=10, uniformtext_mode="show")
+    fig.update_yaxes(title_text=unit)
+    return _base(fig, height=260, legend=False)

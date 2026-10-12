@@ -1,685 +1,433 @@
-import streamlit as st
-import pandas as pd
-import plotly.express as px
 import datetime as dt
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from billing.compute import tenant_charges_for_ym, vacant_site_usage
-from billing.utility import has_bill_tables, reconcile
+import pandas as pd
+import streamlit as st
+
+from billing import views as V
 from billing.config import display_channel_name, load_config
 from billing.period import BILLING_DAY, billing_period_for_ym
-
-
-#---------------------------
-# Title and Header
-#---------------------------
-st.set_page_config(page_title="FishDog Farm Dashboard", layout="wide")
-
-#Center title
-left, mid, right = st.columns([3, 2, 3])
-
-with mid:
-    st.title("FishDog Farm")
-    st.subheader("Data Dashboard")
-
-#---------------------------
-# Data
-#---------------------------
+from billing.utility import has_bill_tables, reconcile
+from ui import charts as C
 
 DB_PATH = "data/energy.sqlite"
-
-FEATURED_GIDS = [417380, 422491, 432058, 432079]
-
-RV_SITES_GID = 417380
-POLE_BARN_MAIN_GID = 422491
-POLE_BARN_SUB_GID = 432058
-
-#---------------------------
-# Color Palette
-#---------------------------
-PALETTE = {
-    "color1": "#4c5424",
-    "color2": "#ceb82c",
-    "color3": "#81c566",
-    "color4": "#6e73b6",
-    "color5": "#d39f76",
-    "color6": "#3d4187",
-}
-
-#For plotly charts specifically
-px.defaults.color_discrete_sequence = [
-    PALETTE["color1"],
-    PALETTE["color2"],
-    PALETTE["color3"],
-    PALETTE["color4"],
-    PALETTE["color5"],
-    PALETTE["color6"],
-]
-
-# -------------------------
-# Helpers
-# -------------------------
-
-@st.cache_data(ttl=60)
-def load_table(sql: str) -> pd.DataFrame:
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(sql, conn)
-    conn.close()
-    return df
-
-@st.cache_data(ttl=60)
-def query_df(sql: str, params: tuple = ()) -> pd.DataFrame:
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(sql, conn, params=params)
-    conn.close()
-    return df
-
-
-def first_of_month(d: dt.date) -> dt.date:
-    return dt.date(d.year, d.month, 1)
-
-
-
-
-
-# -------- Get device names from database --------
-aliases = query_df(
-    "select device_gid, display_name from device_aliases"
-)
-
-device_name_map = dict(
-    zip(aliases["device_gid"], aliases["display_name"])
-)
-
-# -------- Get last time data were updated --------
-last_ingest = query_df(
-    "select value from kv_store where key = 'last_ingested_at_utc' limit 1"
-)
-
-if not last_ingest.empty:
-    utc_ts = last_ingest["value"].iloc[0]
-
-    # Parse ISO string as UTC
-    dt_utc = datetime.fromisoformat(utc_ts).replace(tzinfo=ZoneInfo("UTC"))
-
-    # Convert to Pacific Time
-    dt_pst = dt_utc.astimezone(ZoneInfo("America/Los_Angeles"))
-
-    # Format: Month Day, Year, Time
-    last_updated_str = dt_pst.strftime("%B %d, %Y · %I:%M %p")
-
-else:
-    last_updated_str = "Unknown"
-
-st.caption(f"Last updated: {last_updated_str} (PT)")
-
-
-# -------- Month selector (defaults to current month) --------
-today = dt.date.today()
-default_month = first_of_month(today)
-
-available_months = query_df(
-    """
-    select distinct
-      case
-        when cast(strftime('%d', day) as integer) >= ?
-        then strftime('%Y-%m', date(day, '+1 month'))
-        else strftime('%Y-%m', day)
-      end as ym
-    from usage_daily
-    order by ym desc
-    """,
-    params=(BILLING_DAY,),
-)
-
-raw_months = sorted(available_months["ym"].tolist(), reverse=True)
-
-def ym_to_label(ym: str) -> str:
-    d = dt.date.fromisoformat(ym + "-01")
-    return d.strftime("%B %Y")   # e.g. "January 2026"
-
-# Build mapping
-month_labels = {ym_to_label(ym): ym for ym in raw_months}
-
-# Ensure current month is first
-default_ym = default_month.strftime("%Y-%m")
-if default_ym not in month_labels.values():
-    month_labels = {ym_to_label(default_ym): default_ym, **month_labels}
-
-col_month, col_spacer = st.columns([3, 9])
-
-with col_month:
-    month_label = st.selectbox(
-        "Month",
-        options=list(month_labels.keys()),
-        index=0,
-    )
-
-month_ym = month_labels[month_label]
-
-period_start, period_end = billing_period_for_ym(month_ym, BILLING_DAY)
-
-# Show the actual billing period for clarity/auditing
-st.caption(f"Billing period: {period_start.strftime('%b %d, %Y')} – {period_end.strftime('%b %d, %Y')}")
-
-# -------- Global “as of” / summary --------
-global_range = query_df(
-    """
-    select
-      min(day) as min_day,
-      max(day) as max_day
-    from usage_daily
-    where day >= ?
-      and day <= ?
-    """,
-    params=(period_start.isoformat(), period_end.isoformat()),
-).iloc[0]
-
-as_of = global_range["max_day"]
-
-summary = query_df(
-    """
-    select
-      count(*) as rows,
-      1 as devices,
-      count(distinct channel_num) as device_channels,
-      round(sum(kwh), 3) as kwh_total
-    from usage_daily
-    where device_gid = ?
-      and channel_num = 0
-      and day >= ?
-      and day <= ?
-    """,
-    params=(POLE_BARN_MAIN_GID, period_start.isoformat(), period_end.isoformat()),
-).iloc[0]
-
-st.header("Total Farm Power Usage")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Total kWh", f"{float(summary['kwh_total'] or 0.0):,.2f}")
-c2.metric("Start day", str(global_range["min_day"]))
-c3.metric("End day", str(global_range["max_day"]))
-
-st.divider()
-
-# -------- Tenant calculations --------
-
-st.header("Tenant Power")
-
-def get_device_main_kwh(device_gid: int) -> float:
-    df = query_df(
-        """
-        select sum(kwh) as kwh
-        from usage_daily
-        where device_gid = ?
-          and channel_num = 0
-          and day >= ?
-          and day <= ?
-        """,
-        params=(device_gid, period_start.isoformat(), period_end.isoformat()),
-    )
-    v = df["kwh"].iloc[0]
-    return float(v) if v is not None else 0.0
-
-
-def get_device_total_kwh_pref_main(device_gid: int) -> float:
-    df = query_df(
-        """
-        select
-          sum(case when channel_num = 0 then kwh else 0 end) as kwh_main,
-          sum(case when channel_num != 0 then kwh else 0 end) as kwh_sub
-        from usage_daily
-        where device_gid = ?
-          and day >= ?
-          and day <= ?
-        """,
-        params=(device_gid, period_start.isoformat(), period_end.isoformat()),
-    ).iloc[0]
-
-    main = float(df["kwh_main"] or 0.0)
-    sub  = float(df["kwh_sub"] or 0.0)
-    return main if main > 0 else sub
-
-
-
-def get_channel_kwh(device_gid: int, channel_name: str) -> float:
-    df = query_df(
-        """
-        select sum(kwh) as kwh
-        from usage_daily
-        where device_gid = ?
-          and day >= ?
-          and day <= ?
-          and lower(trim(coalesce(channel_name,''))) = lower(trim(?))
-        """,
-        params=(device_gid, period_start.isoformat(), period_end.isoformat(), channel_name),
-    )
-    v = df["kwh"].iloc[0]
-    return float(v) if v is not None else 0.0
-
-def billing_ym_expr(billing_day: int = BILLING_DAY) -> str:
-    # Labels each row with Emporia-style billing month (YYYY-MM)
-    # If day-of-month >= billing_day => counts toward next month label
-    return f"""
-    case
-      when cast(strftime('%d', day) as integer) >= {billing_day}
-      then strftime('%Y-%m', date(day, '+1 month'))
-      else strftime('%Y-%m', day)
-    end
-    """
-
-def monthly_channel_kwh(device_gid: int, channel_name: str, months: list[str]) -> pd.DataFrame:
-    placeholders = ",".join(["?"] * len(months))
-    ym_expr = billing_ym_expr()
-
-    df = query_df(
-        f"""
-        select
-          {ym_expr} as ym,
-          sum(kwh) as kwh
-        from usage_daily
-        where device_gid = ?
-          and lower(trim(coalesce(channel_name,''))) = lower(trim(?))
-          and {ym_expr} in ({placeholders})
-        group by ym
-        """,
-        params=(device_gid, channel_name, *months),
-    )
-
-    base = pd.DataFrame({"ym": months})
-    out = base.merge(df, on="ym", how="left").fillna({"kwh": 0.0})
-    out["kwh"] = out["kwh"].astype(float)
-    return out
-
-def monthly_device_total_pref_main(device_gid: int, months: list[str]) -> pd.DataFrame:
-    placeholders = ",".join(["?"] * len(months))
-    ym_expr = billing_ym_expr()
-
-    df = query_df(
-        f"""
-        select
-          {ym_expr} as ym,
-          sum(case when channel_num = 0 then kwh else 0 end) as kwh_main,
-          sum(case when channel_num != 0 then kwh else 0 end) as kwh_sub
-        from usage_daily
-        where device_gid = ?
-          and {ym_expr} in ({placeholders})
-        group by ym
-        """,
-        params=(device_gid, *months),
-    )
-
-    base = pd.DataFrame({"ym": months})
-    out = base.merge(df, on="ym", how="left").fillna({"kwh_main": 0.0, "kwh_sub": 0.0})
-    out["kwh_main"] = out["kwh_main"].astype(float)
-    out["kwh_sub"]  = out["kwh_sub"].astype(float)
-    out["kwh"] = out.apply(lambda r: r["kwh_main"] if r["kwh_main"] > 0 else r["kwh_sub"], axis=1)
-    return out[["ym", "kwh"]]
-
-def monthly_device_main_kwh(device_gid: int, months: list[str]) -> pd.DataFrame:
-    placeholders = ",".join(["?"] * len(months))
-    ym_expr = billing_ym_expr()
-
-    df = query_df(
-        f"""
-        select
-          {ym_expr} as ym,
-          sum(case when channel_num = 0 then kwh else 0 end) as kwh
-        from usage_daily
-        where device_gid = ?
-          and {ym_expr} in ({placeholders})
-        group by ym
-        """,
-        params=(device_gid, *months),
-    )
-
-    base = pd.DataFrame({"ym": months})
-    out = base.merge(df, on="ym", how="left").fillna({"kwh": 0.0})
-    out["kwh"] = out["kwh"].astype(float)
-    return out
-
-def monthly_device_total_for_chart(device_gid: int, months: list[str]) -> pd.DataFrame:
-    """
-    Returns a 2-col DF: ym, kwh_total_for_device
-    Uses main (channel 0) if it exists; otherwise uses sub total.
-    """
-    df = monthly_device_total_pref_main(device_gid, months).copy()
-    df = df.rename(columns={"kwh": "kwh_total"})
-    return df
-
-# --- Calculate charges (math in billing/compute.py; people/sites in billing/sites.toml) ---
-_conn = sqlite3.connect(DB_PATH)
-results = tenant_charges_for_ym(_conn, month_ym)
-_vacant_usage = vacant_site_usage(_conn, month_ym)
-_conn.close()
-
-for _site, _kwh in _vacant_usage.items():
-    st.warning(
-        f"{_site} is marked vacant but its meter used {_kwh:,.1f} kWh this billing period. "
-        "That usage was added to the shared shop. Worth checking why."
-    )
-
-#Show results
-cols = st.columns(len(results))
-
-for col, (_, row) in zip(cols, results.iterrows()):
-    with col:
-        st.metric(
-            label=row["Tenant"],
-            value=f"${row['Charge ($)']:,.2f}",
-            delta=None
-        )
-        st.caption(f"{row['kWh (calc)']:,.1f} kWh")
-
-
-st.subheader("Monthly Power Usage over Time")
-
-# ---- choose the last 12 billing months up through the selected month ----
-months_for_chart = [m for m in raw_months if m <= month_ym][:12]
-months_for_chart = list(reversed(months_for_chart))  # oldest -> newest
-
-# ---- monthly charges, same shared calculation as the header above ----
-_conn = sqlite3.connect(DB_PATH)
-rows = []
-for _ym in months_for_chart:
-    _df = tenant_charges_for_ym(_conn, _ym).copy()
-    _df["ym"] = _ym
-    rows.append(_df)
-_conn.close()
-
-monthly_all = pd.concat(rows, ignore_index=True)
-
-monthly_all = monthly_all.rename(columns={
-    monthly_all.columns[0]: "Tenant",
-    monthly_all.columns[1]: "kWh",
-    monthly_all.columns[2]: "$",
-})
-
-# ---- UI controls ----
-tenant_col, tenant_col2 = st.columns([3,9])
-
-with tenant_col:
-    tenant_choice = st.selectbox(
-        "Tenant", 
-        options=sorted(monthly_all["Tenant"].unique().tolist()), 
-        index=0
-        )
-
-view = st.segmented_control(
-    "View",
-    options=["kWh", "$"],
-    default="kWh",
-)
-
-# ---- chart dataframe ----
-chart_df = monthly_all.loc[monthly_all["Tenant"] == tenant_choice, ["ym", "kWh", "$"]].copy()
-chart_df["Month"] = pd.to_datetime(chart_df["ym"] + "-01").dt.strftime("%b %Y")
-
-y_col = "kWh" if view == "kWh" else "$"
-y_title = "kWh (billing month)" if view == "kWh" else "Charge ($, billing month)"
-text_fmt = "%{text:.0f}" if view == "kWh" else "$%{text:,.0f}"
-
-if y_col == "$":
-    bar_color = "#ceb82c"
-else:
-    bar_color = "#3d4187"
-
-
-fig_tenant = px.bar(
-    chart_df,
-    x="Month",
-    y=y_col,
-    text=y_col,
-)
-
-fig_tenant.update_traces(
-    marker_color=bar_color,
-    texttemplate=text_fmt,
-    textposition="outside",
-    cliponaxis=False,
-    hovertemplate=(
-        "<b>%{x}</b><br>"
-        "Usage: %{customdata[0]:,.1f} kWh<br>"
-        "Charge: $%{customdata[1]:,.2f}<extra></extra>"
-    ),
-    customdata=chart_df[["kWh", "$"]].values,
-)
-
-fig_tenant.update_layout(
-    xaxis_title="",
-    yaxis_title=y_title,
-    margin=dict(l=10, r=10, t=10, b=10),
-)
-
-st.plotly_chart(fig_tenant, width="stretch")
-
-st.divider()
-
-# -------- Per-device totals and per-channel tables --------
-st.header("All Power Usage")
-
-placeholders = ",".join(["?"] * len(FEATURED_GIDS))
-
-device_totals = query_df(
-    f"""
-    select
-      device_gid,
-
-      round(sum(case when channel_num = 0 then kwh else 0 end), 3) as kwh_main,
-      round(sum(case when channel_num != 0 then kwh else 0 end), 3) as kwh_sub,
-
-      round(
-        case
-          when sum(case when channel_num = 0 then kwh else 0 end) > 0
-          then sum(case when channel_num = 0 then kwh else 0 end)
-          else sum(case when channel_num != 0 then kwh else 0 end)
-        end
-      , 3) as kwh_device,
-
-      count(distinct case when channel_num != 0 then channel_num end) as channels,
-      min(day) as start_day,
-      max(day) as end_day
-    from usage_daily
-    where day >= ?
-      and day <= ?
-      and device_gid in ({placeholders})
-    group by device_gid
-    order by kwh_device desc
-    """,
-    params=(period_start.isoformat(), period_end.isoformat(), *FEATURED_GIDS),
-)
-
-# Reorder
-device_totals["__order"] = device_totals["device_gid"].apply(
-    lambda x: FEATURED_GIDS.index(int(x)) if int(x) in FEATURED_GIDS else 999
-)
-device_totals = device_totals.sort_values("__order").drop(columns="__order")
-
-
-if device_totals.empty:
-    st.warning("No data found for that month.")
-    st.stop()
-
-
-def render_device_section(device_gid: int):
-    device_name = device_name_map.get(device_gid, f"Device {device_gid}")
-
-    d = device_totals.loc[device_totals["device_gid"] == device_gid]
-    if d.empty:
-        st.subheader(device_name)
-        st.info("No data for this device in the selected billing period.")
-        return
-
-    drow = d.iloc[0]
-
-    st.subheader(device_name)
-    st.metric("Device kWh", f"{float(drow['kwh_device'] or 0.0):,.2f}")
-
-        # ---- Monthly totals chart (last 12 billing months) ----
-    months_for_device_chart = raw_months[:12]
-    months_for_device_chart = list(reversed(months_for_device_chart))  # oldest -> newest
-
-    mdf = monthly_device_total_for_chart(int(device_gid), months_for_device_chart)
-
-    # Label months nicely
-    mdf["Month"] = pd.to_datetime(mdf["ym"] + "-01").dt.strftime("%b %Y")
-    mdf["kWh"] = mdf["kwh_total"].astype(float)
-
-    DEVICE_COLORS = {
-        RV_SITES: "#3d4187",
-        GROW_BARN: "#81c566",
-        POLE_BARN_MAIN: "#ceb82c",
-        POLE_BARN_SUB: "#6e73b6",
-}
-
-    fig_dev = px.bar(
-        mdf,
-        x="Month",
-        y="kWh",
-        text="kWh",
-    )
-    fig_dev.update_traces(
-        marker_color=DEVICE_COLORS.get(int(device_gid), "#3d4187"),
-        texttemplate="%{text:.0f}",
-        textposition="outside",
-        cliponaxis=False,
-    )
-    fig_dev.update_layout(
-        xaxis_title="",
-        yaxis_title="kWh (billing month)",
-        margin=dict(l=10, r=10, t=10, b=10),
-    )
-
-    st.plotly_chart(fig_dev, width="stretch")
-
-
-    # ---- Balance like Emporia  ----
-    main_kwh = float(drow["kwh_main"] or 0.0)
-    sub_kwh = float(drow["kwh_sub"] or 0.0)
-    if main_kwh > 0:
-        bal = main_kwh - sub_kwh
-        st.caption(f"Subchannels: {sub_kwh:,.2f} kWh · Balance: {bal:,.2f} kWh")
-
-    # ---- Channel details (exclude Main) ----
-    try:
-        channels_df = query_df(
-            """
-            select
-              channel_num,
-              coalesce(nullif(trim(channel_name), ''), 'Unnamed') as channel_name,
-              round(sum(kwh), 3) as kwh
-            from usage_daily
-            where device_gid = ?
-              and day >= ?
-              and day <= ?
-              and channel_num != 0
-            group by channel_num, channel_name
-            having kwh is not null
-            order by kwh desc
-            """,
-            params=(int(device_gid), period_start.isoformat(), period_end.isoformat()),
-        )
-    except Exception as e:
-        st.error(f"Channel query failed for {device_name}: {e}")
-        return
-
-    channels_df = channels_df[channels_df["channel_name"] != "Unnamed"].copy()
-    channels_df = channels_df.rename(columns={"channel_name": "Channel", "kwh": "kWh (billing period)"})
-    channels_df = channels_df[["Channel", "kWh (billing period)"]]
-    # Show site names instead of the people's names Emporia uses for tenant channels
-    _cfg = load_config()
-    channels_df["Channel"] = channels_df["Channel"].map(lambda n: display_channel_name(_cfg, int(device_gid), n))
-
-    with st.expander("Channel details", expanded=False):
-        st.dataframe(channels_df, width="stretch", hide_index=True)
 
 RV_SITES = 417380
 GROW_BARN = 432079
 POLE_BARN_MAIN = 422491
 POLE_BARN_SUB = 432058
+FEATURED_GIDS = [RV_SITES, POLE_BARN_MAIN, POLE_BARN_SUB, GROW_BARN]
 
-# Row 1: RV Sites | Grow Barn
-col_left, col_right = st.columns(2)
-with col_left:
-    render_device_section(RV_SITES)
-with col_right:
-    render_device_section(GROW_BARN)
+st.set_page_config(page_title="FishDog Farm Dashboard", layout="wide")
 
-st.divider()
+# ---------------------------------------------------------------- header
+st.markdown(
+    "<h1 style='text-align:center;margin:0;padding:0.2rem 0 0'>FishDog Farm</h1>"
+    "<p style='text-align:center;margin:0 0 0.8rem;opacity:0.7;font-size:1.15rem'>Data Dashboard</p>",
+    unsafe_allow_html=True,
+)
 
-# Row 2: Pole Barn Main | Pole Barn Sub
-col_left, col_right = st.columns(2)
-with col_left:
-    render_device_section(POLE_BARN_MAIN)
-with col_right:
-    render_device_section(POLE_BARN_SUB)
 
-st.divider()
+# ------------------------------------------------------------------ data
+@contextmanager
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
-# -------- Utility bills (Blachly-Lane) vs Emporia --------
-st.header("Utility Bills (Blachly-Lane)")
 
-_conn = sqlite3.connect(DB_PATH)
-try:
-    _rec = reconcile(_conn) if has_bill_tables(_conn) else None
-finally:
-    _conn.close()
+@st.cache_data(ttl=300)
+def q(sql: str, params: tuple = ()) -> pd.DataFrame:
+    with db() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
 
-if _rec is None or _rec.empty:
-    st.info("No utility bills loaded yet. Run the 'Utility (SmartHub) pull' workflow on GitHub.")
+
+@st.cache_data(ttl=300)
+def c_tenants(months: tuple) -> pd.DataFrame:
+    with db() as conn:
+        return V.tenant_history(conn, list(months))
+
+
+@st.cache_data(ttl=300)
+def c_ledger(months: tuple) -> pd.DataFrame:
+    with db() as conn:
+        return V.farm_ledger(conn, list(months))
+
+
+@st.cache_data(ttl=300)
+def c_attention(ym: str):
+    with db() as conn:
+        return V.needs_attention(conn, ym)
+
+
+@st.cache_data(ttl=300)
+def c_cycle_compare(gid: int, ym: str) -> pd.DataFrame:
+    with db() as conn:
+        return V.cycle_vs_previous(conn, gid, ym)
+
+
+@st.cache_data(ttl=300)
+def c_daily(gid: int, start: dt.date, end: dt.date) -> pd.DataFrame:
+    with db() as conn:
+        return V.daily_device(conn, gid, start, end)
+
+
+@st.cache_data(ttl=300)
+def c_device_monthly(gid: int, months: tuple) -> pd.DataFrame:
+    with db() as conn:
+        return V.device_monthly(conn, gid, list(months))
+
+
+@st.cache_data(ttl=300)
+def c_reconcile() -> pd.DataFrame:
+    with db() as conn:
+        return reconcile(conn) if has_bill_tables(conn) else pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def c_bills() -> pd.DataFrame:
+    with db() as conn:
+        return V.bill_list(conn)
+
+
+@st.cache_data(ttl=300)
+def c_bill_detail(bill_ts: int) -> list:
+    with db() as conn:
+        return V.bill_detail(conn, bill_ts)
+
+
+@st.cache_data(ttl=300)
+def c_usage_history() -> pd.DataFrame:
+    with db() as conn:
+        return V.usage_history(conn)
+
+
+cfg = load_config()
+
+aliases = q("select device_gid, display_name from device_aliases")
+device_name_map = dict(zip(aliases["device_gid"], aliases["display_name"]))
+
+# ----------------------------------------------------- month + freshness
+available = q(
+    """
+    select distinct
+      case when cast(strftime('%d', day) as integer) >= ?
+           then strftime('%Y-%m', date(day, '+1 month')) else strftime('%Y-%m', day) end as ym
+    from usage_daily order by ym desc
+    """,
+    params=(BILLING_DAY,),
+)
+raw_months = sorted(available["ym"].tolist(), reverse=True)
+
+
+def ym_label(ym: str) -> str:
+    return dt.date.fromisoformat(ym + "-01").strftime("%B %Y")
+
+
+month_labels = {ym_label(m): m for m in raw_months}
+
+last_ingest = q("select value from kv_store where key = 'last_ingested_at_utc' limit 1")
+if not last_ingest.empty:
+    stamp = datetime.fromisoformat(last_ingest["value"].iloc[0]).replace(tzinfo=ZoneInfo("UTC"))
+    t_local = stamp.astimezone(ZoneInfo("America/Los_Angeles"))
+    updated = f"{t_local:%b} {t_local.day}, {t_local.hour % 12 or 12}:{t_local:%M %p}"
 else:
-    _rec = _rec.sort_values("Bill date").reset_index(drop=True)
-    _latest = _rec.iloc[-1]
+    updated = "unknown"
+
+top_a, _top_b = st.columns([3, 9])
+with top_a:
+    month_label = st.selectbox("Billing month", options=list(month_labels.keys()), index=0)
+ym = month_labels[month_label]
+prev_ym = V.shift_month(ym, -1)
+period_start, period_end = billing_period_for_ym(ym, BILLING_DAY)
+
+last_day = q(
+    "select max(day) as d from usage_daily where day >= ? and day <= ?",
+    params=(period_start.isoformat(), period_end.isoformat()),
+)["d"].iloc[0]
+last_date = dt.date.fromisoformat(last_day) if last_day else None
+in_progress = last_date is not None and last_date < period_end
+st.caption(
+    f"Cycle {period_start:%b} {period_start.day} – {period_end:%b} {period_end.day}, {period_end.year}"
+    + (f" · in progress, data through {last_date:%b} {last_date.day}" if in_progress else "")
+    + f" · updated {updated} PT"
+)
+
+# ------------------------------------------------------ needs attention
+notes = c_attention(ym)
+if notes:
+    with st.container(border=True):
+        st.markdown("**Needs attention**")
+        for severity, text in notes:
+            st.markdown(("⚠️ " if severity == "warning" else "ℹ️ ") + text)
+
+# --------------------------------------------------------------- shared
+chart_months = [m for m in raw_months if m <= ym][:12][::-1]
+if not chart_months:
+    st.warning("No data found for that month.")
+    st.stop()
+all_tenants = c_tenants(tuple(chart_months))
+cur = all_tenants[all_tenants["ym"] == ym] if not all_tenants.empty else pd.DataFrame()
+prev = all_tenants[all_tenants["ym"] == prev_ym] if not all_tenants.empty else pd.DataFrame()
+ledger = c_ledger(tuple(chart_months))
+rec = c_reconcile()
+
+
+def signed_money(x: float) -> str:
+    return f"{'+' if x >= 0 else '-'}${abs(x):,.2f}"
+
+
+def pct_change(now: float, before: float):
+    return None if not before else (now - before) / before * 100.0
+
+
+tab_overview, tab_tenants, tab_farm, tab_utility = st.tabs(["Overview", "Tenants", "Farm power", "Utility bills"])
+
+# ================================================================ OVERVIEW
+with tab_overview:
+    prev_ledger = c_ledger((prev_ym,))
+    lr = ledger[ledger["ym"] == ym].iloc[0]
+    emp_now, emp_prev = float(lr["Emporia total"]), float(prev_ledger["Emporia total"].iloc[0])
+    billed_now = float(cur["Charge ($)"].sum()) if not cur.empty else 0.0
+    billed_prev = float(prev["Charge ($)"].sum()) if not prev.empty else 0.0
+    unbilled_kwh = float(lr["Owners"] + lr["Grow barn"])
+
+    k1, k2, k3, k4 = st.columns(4)
+    d = pct_change(emp_now, emp_prev)
+    k1.metric("Farm power (Emporia)", f"{emp_now:,.0f} kWh", delta=None if d is None else f"{d:+.0f}% vs last cycle", delta_color="off")
+    k2.metric("Billed to tenants", f"${billed_now:,.2f}", delta=f"{signed_money(billed_now - billed_prev)} vs last cycle", delta_color="off")
+    k3.metric("Not billed to tenants", f"{unbilled_kwh:,.0f} kWh", help="Grow barn plus the owners' share of shared power")
+    if not rec.empty:
+        latest = rec.sort_values("Bill date").iloc[-1]
+        k4.metric("Latest utility bill (farm meter)", f"${latest['Farm $']:,.2f}", help=f"Bill dated {latest['Bill date']}: {latest['Farm kWh']:,.0f} kWh")
+    else:
+        k4.metric("Latest utility bill (farm meter)", "–")
+
+    st.markdown("#### What each tenant owes")
+    if cur.empty:
+        st.info("No occupied sites this cycle.")
+    else:
+        cols = st.columns(len(cur))
+        for col, (_, row) in zip(cols, cur.iterrows()):
+            before = prev.loc[prev["Tenant"] == row["Tenant"], "Charge ($)"]
+            delta = None if before.empty else f"{signed_money(row['Charge ($)'] - float(before.iloc[0]))} vs last cycle"
+            col.metric(row["Tenant"], f"${row['Charge ($)']:,.2f}", delta=delta, delta_color="off")
+            col.caption(f"{row['kWh (calc)']:,.0f} kWh")
+
+    st.markdown("#### Where the farm's power goes")
     st.caption(
-        f"Latest bill: {_latest['Bill date']} (meter readings {_latest['Read from']} to {_latest['Read to']}, "
-        f"{int(_latest['Days'])} days)"
+        "Bars: power Emporia measured, split by who it belongs to. Diamond: what the utility's farm meter recorded "
+        "(shown once the bill covers the whole cycle). The base-load amount added to bills isn't measured power, so it isn't here."
     )
-    u1, u2, u3, u4 = st.columns(4)
-    u1.metric("Farm meter kWh", f"{_latest['Farm kWh']:,.0f}")
-    u2.metric("Farm meter bill", f"${_latest['Farm $']:,.2f}")
-    u3.metric("House bill", f"${_latest['House $']:,.2f}")
-    u4.metric(
-        "Not seen by Emporia",
-        f"{_latest['Unaccounted kWh']:,.0f} kWh",
-        delta=f"{_latest['Unaccounted %']:.1f}%",
-        delta_color="off",
-    )
-    st.caption(
-        "Farm meter = every utility meter except the house. Emporia = pole barn main + grow barn over the "
-        "same meter-reading dates. A small gap is normal; a large one means power Emporia is missing."
-    )
+    st.plotly_chart(C.ledger_chart(ledger), theme=None, width="stretch")
 
-    _recent = _rec.tail(12)
-    _chart = _recent.melt(
-        id_vars=["Bill date"], value_vars=["Farm kWh", "Emporia kWh"], var_name="Source", value_name="kWh"
-    )
-    _fig = px.bar(
-        _chart, x="Bill date", y="kWh", color="Source", barmode="group",
-        color_discrete_map={"Farm kWh": PALETTE["color4"], "Emporia kWh": PALETTE["color2"]},
-    )
-    _fig.update_layout(xaxis_title="", yaxis_title="kWh per bill", margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(_fig, width="stretch")
-
-    if not _rec["Checked"].all():
-        st.warning("Some bills below did not add up when read from the PDF; treat their dollar figures with care.")
-
-    with st.expander("All bills"):
-        _show = _rec.sort_values("Bill date", ascending=False).copy()
-        _show["Checked"] = _show["Checked"].map({True: "yes", False: "no"})
-        st.dataframe(
-            _show,
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Farm kWh": st.column_config.NumberColumn(format="%.0f"),
-                "House kWh": st.column_config.NumberColumn(format="%.0f"),
-                "Emporia kWh": st.column_config.NumberColumn(format="%.0f"),
-                "Unaccounted kWh": st.column_config.NumberColumn(format="%.0f"),
-                "Unaccounted %": st.column_config.NumberColumn(format="%.1f%%"),
-                "Farm $": st.column_config.NumberColumn(format="$%.2f"),
-                "House $": st.column_config.NumberColumn(format="$%.2f"),
-                "Farm $/kWh": st.column_config.NumberColumn(format="$%.3f"),
-            },
+# ================================================================ TENANTS
+with tab_tenants:
+    st.markdown("#### What makes up each bill")
+    if cur.empty:
+        st.info("No occupied sites this cycle.")
+    else:
+        st.plotly_chart(
+            C.bill_breakdown_chart(V.bill_breakdown_dollars(cur, cfg.rate_per_kwh)), theme=None, width="stretch"
         )
+        st.caption(
+            f"Each bill = your own metered kWh + a share of the kitchen/lounge, shop and base load, at \\${cfg.rate_per_kwh:.4f}/kWh, "
+            f"plus a \\${cfg.monthly_fee:.2f} monthly fee. Shares are split by people, and vacant sites aren't counted."
+        )
+        table = cur[["Tenant", "Own kWh", "Kitchen kWh", "Shop kWh", "Base kWh", "kWh (calc)", "Fee ($)", "Charge ($)"]].copy()
+        kwh_cols = ["Own kWh", "Kitchen kWh", "Shop kWh", "Base kWh", "kWh (calc)"]
+        st.dataframe(
+            table, hide_index=True, width="stretch",
+            column_config={c: st.column_config.NumberColumn(format="%.1f") for c in kwh_cols}
+            | {"Fee ($)": st.column_config.NumberColumn(format="$%.2f"), "Charge ($)": st.column_config.NumberColumn(format="$%.2f")},
+        )
+        st.download_button(
+            "Download this cycle (CSV)", table.to_csv(index=False).encode("utf-8"),
+            file_name=f"tenant-charges-{ym}.csv", mime="text/csv",
+        )
+
+    st.markdown("#### One tenant over time")
+    sites_in_range = [s.name for s in cfg.sites if (all_tenants["Tenant"] == s.name).any()] if not all_tenants.empty else []
+    if sites_in_range:
+        pick_a, pick_b = st.columns([3, 9])
+        tenant_choice = pick_a.selectbox("Site", sites_in_range)
+        view = pick_b.segmented_control("View", options=["$", "kWh"], default="$")
+        site_obj = next(s for s in cfg.sites if s.name == tenant_choice)
+        vacant = [m for m in chart_months if cfg.people(site_obj, m) == 0]
+        st.plotly_chart(C.tenant_trend_chart(all_tenants, tenant_choice, view or "$", vacant), theme=None, width="stretch")
+
+    st.markdown("#### Who lived where")
+    st.plotly_chart(C.occupancy_chart(V.occupancy_grid(chart_months)), theme=None, width="stretch")
+    st.caption("Number of people per site each billing month (– means vacant). Edit this in billing/sites.toml.")
+
+# ============================================================== FARM POWER
+with tab_farm:
+    device_choices = {
+        "Pole barn (main)": POLE_BARN_MAIN,
+        "RV sites": RV_SITES,
+        "Grow barn": GROW_BARN,
+        "Pole barn (sub-panel)": POLE_BARN_SUB,
+    }
+    pick = st.selectbox("Device", list(device_choices.keys()))
+    gid = device_choices[pick]
+
+    st.markdown("#### Day by day, this cycle vs last")
+    st.plotly_chart(C.cycle_compare_chart(c_cycle_compare(gid, ym)), theme=None, width="stretch")
+
+    st.markdown("#### Daily usage, last 13 weeks")
+    end_day = min(period_end, last_date) if last_date else period_end
+    start_day = end_day - dt.timedelta(days=13 * 7 - 1)
+    start_day -= dt.timedelta(days=start_day.weekday())  # start on a Monday
+    daily = c_daily(gid, start_day, end_day)
+    if daily.empty:
+        st.info("No daily data for this device.")
+    else:
+        st.plotly_chart(C.calendar_heatmap(daily, pd.Timestamp(start_day)), theme=None, width="stretch")
+        st.caption("Each square is one day; brighter means more kWh. Unusual bright days stand out.")
+
+    st.markdown("#### All devices")
+    device_totals = q(
+        f"""
+        select device_gid,
+          round(sum(case when channel_num = 0 then kwh else 0 end), 3) as kwh_main,
+          round(sum(case when channel_num != 0 then kwh else 0 end), 3) as kwh_sub
+        from usage_daily
+        where day >= ? and day <= ? and device_gid in ({",".join(["?"] * len(FEATURED_GIDS))})
+        group by device_gid
+        """,
+        params=(period_start.isoformat(), period_end.isoformat(), *FEATURED_GIDS),
+    ).set_index("device_gid")
+
+    def device_section(device_gid: int):
+        name = device_name_map.get(device_gid, f"Device {device_gid}")
+        st.subheader(name)
+        if device_gid not in device_totals.index:
+            st.info("No data for this device in the selected billing period.")
+            return
+        row = device_totals.loc[device_gid]
+        main_kwh, sub_kwh = float(row["kwh_main"] or 0), float(row["kwh_sub"] or 0)
+        st.metric("Device kWh", f"{(main_kwh if main_kwh > 0 else sub_kwh):,.1f}")
+        mdf = c_device_monthly(device_gid, tuple(chart_months))
+        st.plotly_chart(C.monthly_bar_chart(mdf["ym"].tolist(), mdf["kwh"].tolist()), theme=None, width="stretch")
+        if main_kwh > 0:
+            st.caption(f"Subchannels: {sub_kwh:,.1f} kWh · Balance: {main_kwh - sub_kwh:,.1f} kWh")
+        ch = q(
+            """
+            select coalesce(nullif(trim(channel_name), ''), 'Unnamed') as channel_name, round(sum(kwh), 3) as kwh
+            from usage_daily where device_gid = ? and day >= ? and day <= ? and channel_num != 0
+            group by channel_num, channel_name having kwh is not null order by kwh desc
+            """,
+            params=(int(device_gid), period_start.isoformat(), period_end.isoformat()),
+        )
+        ch = ch[ch["channel_name"] != "Unnamed"].rename(columns={"channel_name": "Channel", "kwh": "kWh (billing period)"})
+        # Show site names instead of the people's names Emporia uses for tenant channels
+        ch["Channel"] = ch["Channel"].map(lambda n: display_channel_name(cfg, int(device_gid), n))
+        with st.expander("Channel details", expanded=False):
+            st.dataframe(ch, width="stretch", hide_index=True)
+
+    row1a, row1b = st.columns(2)
+    with row1a:
+        device_section(RV_SITES)
+    with row1b:
+        device_section(GROW_BARN)
+    row2a, row2b = st.columns(2)
+    with row2a:
+        device_section(POLE_BARN_MAIN)
+    with row2b:
+        device_section(POLE_BARN_SUB)
+
+# ============================================================ UTILITY BILLS
+with tab_utility:
+    bills = c_bills()
+    if bills.empty:
+        st.info("No utility bills loaded yet. Run the 'Utility (SmartHub) pull' workflow on GitHub.")
+    else:
+        labels = {f"{r['bill_date']}  ·  ${r['original_amount']:,.2f}": int(r["bill_ts"]) for _, r in bills.iterrows()}
+        sel_a, _sp = st.columns([4, 8])
+        chosen = sel_a.selectbox("Bill", list(labels.keys()), index=0)
+        ts = labels[chosen]
+        b = bills[bills["bill_ts"] == ts].iloc[0]
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total current charges", f"${b['total_current_charge']:,.2f}" if pd.notna(b["total_current_charge"]) else "–")
+        m2.metric("Adjustments", f"${b['total_adjustments']:,.2f}" if pd.notna(b["total_adjustments"]) else "–")
+        m3.metric("Usage billed", f"{b['total_usage_kwh']:,.0f} kWh" if pd.notna(b["total_usage_kwh"]) else "–")
+        m4.metric(
+            "Usage charges", f"${b['total_usage_charge']:,.2f}" if pd.notna(b["total_usage_charge"]) else "–",
+            help="Energy and distribution charges as SmartHub reports them, before credits and the Energy Share line.",
+        )
+        if int(b["usage_estimated"] or 0):
+            st.warning("The utility marked usage on this bill as estimated.")
+
+        st.markdown("#### The bill, meter by meter")
+        uh = c_usage_history()
+        for m in c_bill_detail(ts):
+            with st.container(border=True):
+                st.markdown(f"**{m['role']}** · meter {m['meter']}")
+                reading = pd.DataFrame(
+                    [{
+                        "From": m["read_from"], "To": m["read_to"], "Previous": m["prev"], "Present": m["present"],
+                        "Days": m["days"], "Multiplier": m["multiplier"], "Usage (kWh)": m["usage_kwh"],
+                    }]
+                )
+                st.caption("Reading dates and usage")
+                st.dataframe(reading, hide_index=True, width="stretch",
+                             column_config={"Usage (kWh)": st.column_config.NumberColumn(format="%.0f")})
+                st.caption("Current service detail")
+                lines = m["lines"].copy()
+                total_row = pd.DataFrame([{"Description": "Total current charges for this location", "kWh": None, "Rate": None, "Amount": m["total"]}])
+                shown = pd.concat([lines, total_row], ignore_index=True)
+                # Text for the optional columns so blanks stay blank (a number column would print "None")
+                shown["kWh"] = shown["kWh"].map(lambda v: "" if pd.isna(v) else f"{v:,.0f}")
+                shown["Rate"] = shown["Rate"].map(lambda v: "" if pd.isna(v) else f"${v:.5f}")
+                shown["Amount"] = shown["Amount"].map(lambda v: f"-${abs(v):,.2f}" if v < 0 else f"${v:,.2f}")
+                st.dataframe(shown, hide_index=True, width="stretch")
+                if not m["ok"]:
+                    st.warning("These lines did not add up to the printed total when the bill was read; treat the dollars with care.")
+                if not uh.empty:
+                    mine = uh[(uh["meter"] == m["meter"]) & (uh["read_to"] == m["read_to"])]
+                    if not mine.empty:
+                        r = mine.iloc[0]
+                        a, bb, c = st.columns(3)
+                        a.metric("Avg per day", f"{r['kWh/day']:,.1f} kWh")
+                        bb.metric("Same time last year", f"{r['Last year kWh/day']:,.1f} kWh/day" if pd.notna(r["Last year kWh/day"]) else "–")
+                        c.metric("Avg cost per day", f"${r['$/day']:,.2f}" if pd.notna(r["$/day"]) else "–")
+
+        st.markdown("#### Usage trends")
+        if not uh.empty:
+            t1, t2 = st.columns(2)
+            with t1:
+                st.markdown("**Farm meter, kWh per day**")
+                st.plotly_chart(C.usage_history_chart(uh, "Farm"), theme=None, width="stretch")
+            with t2:
+                st.markdown("**House meter, kWh per day**")
+                st.plotly_chart(C.usage_history_chart(uh, "House"), theme=None, width="stretch")
+            st.markdown("**All-in cost per kWh**")
+            st.caption("Fixed charges are spread over the kWh used, so the cost per kWh climbs when usage drops.")
+            st.plotly_chart(C.cost_per_kwh_chart(uh), theme=None, width="stretch")
+
+        if not rec.empty:
+            st.markdown("#### Does Emporia agree with the farm meter?")
+            st.caption("The share of the utility farm meter's kWh that Emporia (pole barn main + grow barn) recorded over the same reading dates.")
+            st.plotly_chart(C.coverage_chart(rec), theme=None, width="stretch")
+            with st.expander("All bills, side by side"):
+                show = rec.sort_values("Bill date", ascending=False).copy()
+                show["Checked"] = show["Checked"].map({True: "yes", False: "no"})
+                st.dataframe(
+                    show, hide_index=True, width="stretch",
+                    column_config={
+                        "Farm kWh": st.column_config.NumberColumn(format="%.0f"),
+                        "House kWh": st.column_config.NumberColumn(format="%.0f"),
+                        "Emporia kWh": st.column_config.NumberColumn(format="%.0f"),
+                        "Unaccounted kWh": st.column_config.NumberColumn(format="%.0f"),
+                        "Unaccounted %": st.column_config.NumberColumn(format="%.1f%%"),
+                        "Farm $": st.column_config.NumberColumn(format="$%.2f"),
+                        "House $": st.column_config.NumberColumn(format="$%.2f"),
+                        "Farm $/kWh": st.column_config.NumberColumn(format="$%.3f"),
+                    },
+                )
