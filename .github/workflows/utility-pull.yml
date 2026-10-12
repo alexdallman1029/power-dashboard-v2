@@ -7,6 +7,9 @@ on:
       months_back:
         description: "Months of utility history to pull"
         default: "24"
+      bills_limit:
+        description: "How many of the newest bills to read PDF detail for"
+        default: "24"
 
 permissions:
   contents: write
@@ -30,11 +33,20 @@ jobs:
           SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
           SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
         run: python -m ingest.pull_smarthub ${{ github.event.inputs.months_back || '24' }}
+      - name: Pull bills and per-meter charge lines from SmartHub
+        env:
+          SMARTHUB_USERNAME: ${{ secrets.SMARTHUB_USERNAME }}
+          SMARTHUB_PASSWORD: ${{ secrets.SMARTHUB_PASSWORD }}
+          SMARTHUB_ACCOUNT: ${{ secrets.SMARTHUB_ACCOUNT }}
+          SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
+        run: |
+          pip install pypdf fonttools
+          python -m ingest.pull_smarthub_bills ${{ github.event.inputs.bills_limit || '24' }}
       - name: Commit updated database
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/energy.sqlite
-          git diff --cached --quiet || git commit -m "Update utility monthly usage"
+          git diff --cached --quiet || git commit -m "Update utility usage and bills"
           git pull --rebase
           git push
