@@ -2,7 +2,7 @@ name: Monthly tenant bills
 
 on:
   schedule:
-    - cron: "0 20 23 * *"   # 23rd at 20:00 UTC, after that morning's data pull
+    - cron: "0 18 1 * *"   # 1st of the month, 18:00 UTC (11 AM Pacific), after the daily data pulls
   workflow_dispatch:
     inputs:
       send:

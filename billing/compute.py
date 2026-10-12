@@ -83,7 +83,8 @@ def vacant_site_usage(conn: sqlite3.Connection, billing_ym: str) -> dict[str, fl
     }
 
 
-def tenant_charges_for_ym(conn: sqlite3.Connection, billing_ym: str) -> pd.DataFrame:
+def _pool_inputs(conn: sqlite3.Connection, billing_ym: str) -> dict:
+    """The kWh inputs shared by the tenant bills and the owner summary."""
     cfg = load_config()
     start, end = billing_period_for_ym(billing_ym)
     s, e = start.isoformat(), end.isoformat()
@@ -104,7 +105,7 @@ def tenant_charges_for_ym(conn: sqlite3.Connection, billing_ym: str) -> pd.DataF
     # (vacant main-panel sites are already left in it by the line above).
     vacant_extra = sum(site_kwh[s_.name] for s_ in vacant if s_.device_gid != POLE_BARN_MAIN_GID)
 
-    return calculate_site_charges(
+    return dict(
         site_kwh=site_kwh,
         site_people=site_people,
         unbilled_people=cfg.unbilled(billing_ym),
@@ -114,3 +115,28 @@ def tenant_charges_for_ym(conn: sqlite3.Connection, billing_ym: str) -> pd.DataF
         fee=cfg.monthly_fee,
         base_kwh=cfg.base_kwh,
     )
+
+
+def tenant_charges_for_ym(conn: sqlite3.Connection, billing_ym: str) -> pd.DataFrame:
+    return calculate_site_charges(**_pool_inputs(conn, billing_ym))
+
+
+def owner_share_for_ym(conn: sqlite3.Connection, billing_ym: str) -> dict:
+    """What the unbilled residents (owners) absorb of the shared pools for a billing month.
+
+    Base load and the shared shop are divided across ALL people, so the owners' portion is
+    unbilled / (billed + unbilled) of those two pools. Dollars use the tenant kWh rate.
+    """
+    p = _pool_inputs(conn, billing_ym)
+    billed = sum(n for n in p["site_people"].values() if n > 0)
+    unbilled = p["unbilled_people"]
+    everyone = billed + unbilled
+    pool_kwh = p["base_kwh"] + p["shared_shop_kwh"]
+    kwh = pool_kwh * unbilled / everyone if everyone else 0.0
+    return {
+        "kwh": kwh,
+        "cost": kwh * p["rate"],
+        "unbilled_people": unbilled,
+        "all_people": everyone,
+        "pool_kwh": pool_kwh,
+    }

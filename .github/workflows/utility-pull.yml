@@ -1,7 +1,10 @@
 name: Utility (SmartHub) pull
 
-# Manual for now. Once the numbers match your bills, a monthly schedule can be added.
+# Runs daily so the newest utility bill is in the database by the 1st, and can be run
+# by hand to backfill history.
 on:
+  schedule:
+    - cron: "30 10 * * *"   # daily, 30 minutes after the Emporia pull
   workflow_dispatch:
     inputs:
       months_back:
@@ -41,7 +44,7 @@ jobs:
           SMARTHUB_SERVICE_LOCATION: ${{ secrets.SMARTHUB_SERVICE_LOCATION }}
         run: |
           pip install pypdf fonttools
-          python -m ingest.pull_smarthub_bills ${{ github.event.inputs.bills_limit || '24' }}
+          python -m ingest.pull_smarthub_bills ${{ github.event.inputs.bills_limit || '6' }}
       - name: Commit updated database
         run: |
           git config user.name "github-actions[bot]"
