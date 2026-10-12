@@ -16,7 +16,6 @@ History = tuple[tuple[str, int], ...]  # (from_ym, people), sorted by from_ym
 @dataclass(frozen=True)
 class Site:
     name: str
-    greeting: str
     device_gid: int | None  # None = no Emporia meter (yet)
     channel: str | None
     history: History
@@ -30,6 +29,7 @@ class BillingConfig:
     vacant_alert_kwh: float
     house_meter: str
     farm_emporia_devices: tuple[int, ...]
+    grow_barn_device: int | None
     unbilled_history: History
     sites: tuple[Site, ...]
 
@@ -71,7 +71,6 @@ def load_config(path: Path = CONFIG_PATH) -> BillingConfig:
     sites = [
         Site(
             name=s["name"],
-            greeting=s.get("greeting") or s["name"],
             device_gid=int(s["device_gid"]) if "device_gid" in s else None,
             channel=s.get("channel"),
             history=_parse_history(s.get("history"), f'site "{s["name"]}"'),
@@ -89,6 +88,7 @@ def load_config(path: Path = CONFIG_PATH) -> BillingConfig:
         vacant_alert_kwh=float(rates.get("vacant_alert_kwh", 5.0)),
         house_meter=str(raw.get("utility", {}).get("house_meter", "")),
         farm_emporia_devices=tuple(int(g) for g in raw.get("utility", {}).get("farm_emporia_devices", [])),
+        grow_barn_device=(int(raw["utility"]["grow_barn_device"]) if "grow_barn_device" in raw.get("utility", {}) else None),
         unbilled_history=_parse_history(
             raw.get("unbilled_residents", {}).get("history", [{"from": "2000-01", "people": 0}]),
             "unbilled_residents",

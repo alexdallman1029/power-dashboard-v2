@@ -23,21 +23,16 @@ import sys
 import requests
 
 from billing.compute import owner_share_for_ym, tenant_charges_for_ym, vacant_site_usage
-from billing.config import load_config
 from billing.period import billing_period_for_ym, last_closed_billing_ym
 from billing.utility import has_bill_tables, reconcile
 
 DB_PATH = "data/energy.sqlite"
 
-MESSAGE = (
-    "Hi {first}, your electric bill for {start} - {end} is ${amount:,.2f} "
-    "({kwh:,.0f} kWh). Thanks!"
-)
+MESSAGE = "Hi, power charges for the month are ${amount:,.2f}."
 
 
 def build_messages(ym: str) -> list[dict]:
     start, end = billing_period_for_ym(ym)
-    greetings = {site.name: site.greeting for site in load_config().sites}
     conn = sqlite3.connect(DB_PATH)
     try:
         last_day = conn.execute("select max(day) from usage_daily").fetchone()[0]
@@ -60,13 +55,7 @@ def build_messages(ym: str) -> list[dict]:
             {
                 "tenant": name,
                 "amount": float(row["Charge ($)"]),
-                "body": MESSAGE.format(
-                    first=greetings[name],
-                    start=f"{start:%b} {start.day}",
-                    end=f"{end:%b} {end.day}",
-                    amount=float(row["Charge ($)"]),
-                    kwh=float(row["kWh (calc)"]),
-                ),
+                "body": MESSAGE.format(amount=float(row["Charge ($)"])),
             }
         )
     return msgs
@@ -76,7 +65,8 @@ OWNER_MESSAGE = (
     "Blachly-Lane bill {bill}: house {house_kwh:,.0f} kWh ${house_cost:,.2f}; "
     "farm meter {farm_kwh:,.0f} kWh ${farm_cost:,.2f} (Emporia saw {seen:.1f}% of farm kWh). "
     "Tenants billed for {start} - {end}: ${tenants:,.2f}. "
-    "Shared power on you and your partner: {owner_kwh:,.0f} kWh (~${owner_cost:,.2f})."
+    "Farm power not billed to tenants: {owner_kwh:,.0f} kWh (~${owner_cost:,.2f}) = "
+    "you and your partner's share of shared power {share_kwh:,.0f} kWh + grow barn {grow_kwh:,.0f} kWh."
 )
 
 
@@ -113,8 +103,10 @@ def build_owner_message(ym: str) -> str | None:
         start=_md(start),
         end=_md(end),
         tenants=tenants,
-        owner_kwh=owner["kwh"],
-        owner_cost=owner["cost"],
+        owner_kwh=owner["total_kwh"],
+        owner_cost=owner["total_cost"],
+        share_kwh=owner["kwh"],
+        grow_kwh=owner["grow_kwh"],
     )
 
 

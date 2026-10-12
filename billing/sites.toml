@@ -48,6 +48,9 @@ vacant_alert_kwh = 5.0
 [utility]
 house_meter = "R628"
 farm_emporia_devices = [422491, 432079]
+# The grow barn is farm power that tenants are never billed for. It is reported to you
+# (with your own share of shared power) as "not billed to tenants".
+grow_barn_device = 432079
 
 # People who use base/shop power but are not billed (e.g. the owners).
 [unbilled_residents]
@@ -58,7 +61,6 @@ history = [
 # ------------------------------------------------------------
 #  SITES
 #  name      : what appears on the dashboard and in texts
-#  greeting  : how the text addresses them ("Hi <greeting>, ...")
 #  device_gid / channel : the Emporia meter for this site (the channel name
 #                          as it appears in Emporia - NOT the display name).
 #                          Leave both out for a site with no meter yet: it still
@@ -67,7 +69,6 @@ history = [
 
 [[sites]]
 name = "East Site"
-greeting = "Kelly and Russ"
 device_gid = 417380
 channel = "Kelly & Russ"
 history = [
@@ -76,7 +77,6 @@ history = [
 
 [[sites]]
 name = "West Site"
-greeting = "Ryan"
 device_gid = 417380
 channel = "Ryan"
 history = [
@@ -87,7 +87,6 @@ history = [
 
 [[sites]]
 name = "Middle Site"
-greeting = "Marc"
 device_gid = 417380
 channel = "Marc"
 history = [
@@ -97,7 +96,6 @@ history = [
 
 [[sites]]
 name = "Airstream"
-greeting = "there"
 device_gid = 422491
 channel = "Airstream"
 history = [
@@ -109,7 +107,6 @@ history = [
 # usage of its own. When it gets a meter, add device_gid and channel lines here.
 [[sites]]
 name = "Yurt"
-greeting = "there"
 history = [
   { from = "2026-08", people = 1 },
 ]

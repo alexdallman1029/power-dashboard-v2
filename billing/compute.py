@@ -122,7 +122,8 @@ def tenant_charges_for_ym(conn: sqlite3.Connection, billing_ym: str) -> pd.DataF
 
 
 def owner_share_for_ym(conn: sqlite3.Connection, billing_ym: str) -> dict:
-    """What the unbilled residents (owners) absorb of the shared pools for a billing month.
+    """Farm power Emporia assigns to the owners rather than tenants, for a billing month:
+    the unbilled residents' share of the shared pools, plus the grow barn.
 
     Base load and the shared shop are divided across ALL people, so the owners' portion is
     unbilled / (billed + unbilled) of those two pools. Dollars use the tenant kWh rate.
@@ -133,9 +134,18 @@ def owner_share_for_ym(conn: sqlite3.Connection, billing_ym: str) -> dict:
     everyone = billed + unbilled
     pool_kwh = p["base_kwh"] + p["shared_shop_kwh"]
     kwh = pool_kwh * unbilled / everyone if everyone else 0.0
+    cfg = load_config()
+    start, end = billing_period_for_ym(billing_ym)
+    grow = (
+        _device_total_pref_main(conn, cfg.grow_barn_device, start.isoformat(), end.isoformat())
+        if cfg.grow_barn_device is not None
+        else 0.0
+    )
     return {
-        "kwh": kwh,
-        "cost": kwh * p["rate"],
+        "kwh": kwh,                      # unbilled residents' share of base + shop
+        "grow_kwh": grow,                # grow barn: farm power tenants never pay for
+        "total_kwh": kwh + grow,
+        "total_cost": (kwh + grow) * p["rate"],
         "unbilled_people": unbilled,
         "all_people": everyone,
         "pool_kwh": pool_kwh,
