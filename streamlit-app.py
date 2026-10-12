@@ -9,6 +9,7 @@ from PIL import Image
 
 from billing.compute import tenant_charges_for_ym, vacant_site_usage
 from billing.utility import has_bill_tables, reconcile
+from billing.config import display_channel_name, load_config
 from billing.period import BILLING_DAY, billing_period_for_ym
 
 
@@ -589,33 +590,12 @@ def render_device_section(device_gid: int):
     channels_df = channels_df[channels_df["channel_name"] != "Unnamed"].copy()
     channels_df = channels_df.rename(columns={"channel_name": "Channel", "kwh": "kWh (billing period)"})
     channels_df = channels_df[["Channel", "kWh (billing period)"]]
+    # Show site names instead of the people's names Emporia uses for tenant channels
+    _cfg = load_config()
+    channels_df["Channel"] = channels_df["Channel"].map(lambda n: display_channel_name(_cfg, int(device_gid), n))
 
     with st.expander("Channel details", expanded=False):
         st.dataframe(channels_df, width="stretch", hide_index=True)
-
-
-    channels_df = query_df(
-        """
-        select
-        channel_num,
-        coalesce(nullif(trim(channel_name), ''), 'Unnamed') as channel_name,
-        round(sum(kwh), 3) as kwh
-        from usage_daily
-        where device_gid = ?
-        and day >= ?
-        and day <= ?
-        and channel_num != 0
-        group by channel_num, channel_name
-        having kwh is not null
-        order by kwh desc
-        """,
-        params=(int(device_gid), period_start.isoformat(), period_end.isoformat()),
-    )
-
-    channels_df = channels_df[channels_df["channel_name"] != "Unnamed"].copy()
-    channels_df = channels_df.rename(columns={"channel_name": "Channel", "kwh": "kWh (billing period)"})
-    channels_df = channels_df[["Channel", "kWh (billing period)"]]
-
 
 RV_SITES = 417380
 GROW_BARN = 432079

@@ -62,6 +62,16 @@ def _parse_history(raw, where: str) -> History:
     return tuple(sorted(out))
 
 
+def display_channel_name(cfg: "BillingConfig", device_gid: int, channel_name: str) -> str:
+    """Name to show on the dashboard for an Emporia channel: the site name for tenant
+    channels (so people's names from Emporia never appear), otherwise the channel name."""
+    key = (channel_name or "").strip().lower()
+    for site in cfg.sites:
+        if site.device_gid == device_gid and site.channel and site.channel.strip().lower() == key:
+            return site.name
+    return channel_name
+
+
 @lru_cache(maxsize=1)
 def load_config(path: Path = CONFIG_PATH) -> BillingConfig:
     with open(path, "rb") as f:
