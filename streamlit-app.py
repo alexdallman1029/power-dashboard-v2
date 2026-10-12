@@ -21,7 +21,8 @@ st.set_page_config(page_title="FishDog Farm Dashboard", layout="wide")
 left, mid, right = st.columns([3, 2, 3])
 
 with mid:
-    st.title("Data Dashboard")
+    st.title("FishDog Farm")
+    st.subheader("Data Dashboard")
 
 #---------------------------
 # Data
