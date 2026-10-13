@@ -119,7 +119,14 @@ def send_sms(to: str, body: str) -> None:
         data={"To": to, "From": os.environ["TWILIO_FROM_NUMBER"], "Body": body},
         timeout=30,
     )
-    r.raise_for_status()
+    if not r.ok:
+        # Twilio explains every rejection with a code and message (no secrets in it)
+        try:
+            err = r.json()
+            detail = f"Twilio error {err.get('code')}: {err.get('message')}"
+        except ValueError:
+            detail = r.text[:300]
+        raise RuntimeError(f"HTTP {r.status_code}. {detail}")
 
 
 def main() -> int:
