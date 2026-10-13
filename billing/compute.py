@@ -83,8 +83,12 @@ def vacant_site_usage(conn: sqlite3.Connection, billing_ym: str) -> dict[str, fl
     }
 
 
-def _pool_inputs(conn: sqlite3.Connection, billing_ym: str) -> dict:
-    """The kWh inputs shared by the tenant bills and the owner summary."""
+def _pool_inputs(conn: sqlite3.Connection, billing_ym: str, people_override: dict | None = None) -> dict:
+    """The kWh inputs shared by the tenant bills and the owner summary.
+
+    `people_override` ({site name: people}) is for what-if views: it replaces the people count
+    from sites.toml for the named sites. Real billing never passes it.
+    """
     cfg = load_config()
     start, end = billing_period_for_ym(billing_ym)
     s, e = start.isoformat(), end.isoformat()
@@ -95,6 +99,7 @@ def _pool_inputs(conn: sqlite3.Connection, billing_ym: str) -> dict:
 
     site_kwh = _site_kwh(conn, billing_ym)
     site_people = {site.name: cfg.people(site, billing_ym) for site in cfg.sites}
+    site_people.update({k: int(v) for k, v in (people_override or {}).items() if k in site_people})
     occupied = [site for site in cfg.sites if site_people[site.name] > 0]
     vacant = [site for site in cfg.sites if site_people[site.name] == 0]
 
@@ -117,8 +122,10 @@ def _pool_inputs(conn: sqlite3.Connection, billing_ym: str) -> dict:
     )
 
 
-def tenant_charges_for_ym(conn: sqlite3.Connection, billing_ym: str) -> pd.DataFrame:
-    return calculate_site_charges(**_pool_inputs(conn, billing_ym))
+def tenant_charges_for_ym(
+    conn: sqlite3.Connection, billing_ym: str, people_override: dict | None = None
+) -> pd.DataFrame:
+    return calculate_site_charges(**_pool_inputs(conn, billing_ym, people_override))
 
 
 def owner_share_for_ym(conn: sqlite3.Connection, billing_ym: str) -> dict:

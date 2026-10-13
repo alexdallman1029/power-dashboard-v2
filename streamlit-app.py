@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from billing import views as V
+from billing.compute import tenant_charges_for_ym
 from billing.config import display_channel_name, load_config
 from billing.period import BILLING_DAY, billing_period_for_ym
 from billing.utility import has_bill_tables, reconcile
@@ -51,6 +52,24 @@ def q(sql: str, params: tuple = ()) -> pd.DataFrame:
 def c_tenants(months: tuple) -> pd.DataFrame:
     with db() as conn:
         return V.tenant_history(conn, list(months))
+
+
+@st.cache_data(ttl=300)
+def c_cycle_charges(ym: str, override: tuple) -> pd.DataFrame:
+    with db() as conn:
+        return tenant_charges_for_ym(conn, ym, dict(override) or None)
+
+
+@st.cache_data(ttl=300)
+def c_site_cards(ym: str, override: tuple) -> pd.DataFrame:
+    with db() as conn:
+        return V.site_cards(conn, ym, dict(override) or None)
+
+
+@st.cache_data(ttl=300)
+def c_channels(gid: int, start: dt.date, end: dt.date):
+    with db() as conn:
+        return V.channel_breakdown(conn, gid, start, end)
 
 
 @st.cache_data(ttl=300)
@@ -172,8 +191,32 @@ if not chart_months:
     st.warning("No data found for that month.")
     st.stop()
 all_tenants = c_tenants(tuple(chart_months))
-cur = all_tenants[all_tenants["ym"] == ym] if not all_tenants.empty else pd.DataFrame()
 prev = all_tenants[all_tenants["ym"] == prev_ym] if not all_tenants.empty else pd.DataFrame()
+
+# What-if headcounts: the dropdowns on the site cards set these. They change only what is shown
+# here (cards, breakdown, CSV); real billing and the texts always use billing/sites.toml.
+PEOPLE_LABELS = {0: "Vacant", 1: "1 person", 2: "2 people"}
+
+
+def people_label(n: int) -> str:
+    return PEOPLE_LABELS.get(n, f"{n} people")
+
+
+def ppl_key(site_name: str) -> str:
+    return f"ppl_{ym}_{site_name}"
+
+
+override = {}
+for _site in cfg.sites:
+    if ppl_key(_site.name) in st.session_state:
+        picked = next((n for n in range(0, 9) if people_label(n) == st.session_state[ppl_key(_site.name)]), None)
+        if picked is not None and picked != cfg.people(_site, ym):
+            override[_site.name] = picked
+whatif = bool(override)
+override_t = tuple(sorted(override.items()))
+cur = c_cycle_charges(ym, override_t)
+if not cur.empty:
+    cur = cur.assign(ym=ym)
 ledger = c_ledger(tuple(chart_months))
 rec = c_reconcile()
 
@@ -209,15 +252,44 @@ with tab_overview:
         k4.metric("Latest utility bill (farm meter)", "–")
 
     st.markdown("#### What each tenant owes")
-    if cur.empty:
-        st.info("No occupied sites this cycle.")
-    else:
-        cols = st.columns(len(cur))
-        for col, (_, row) in zip(cols, cur.iterrows()):
-            before = prev.loc[prev["Tenant"] == row["Tenant"], "Charge ($)"]
-            delta = None if before.empty else f"{signed_money(row['Charge ($)'] - float(before.iloc[0]))} vs last cycle"
-            col.metric(row["Tenant"], f"${row['Charge ($)']:,.2f}", delta=delta, delta_color="off")
-            col.caption(f"{row['kWh (calc)']:,.0f} kWh")
+    if whatif:
+        wi_a, wi_b = st.columns([9, 3])
+        wi_a.info(
+            "What-if view: the charges below use the headcounts you picked, not the real occupancy. "
+            "Your texts and past bills are unchanged."
+        )
+
+        def _reset():
+            for _s in cfg.sites:
+                st.session_state.pop(ppl_key(_s.name), None)
+
+        wi_b.button("Reset to real occupancy", on_click=_reset)
+
+    cards = c_site_cards(ym, override_t)
+    prev_by_site = prev.set_index("Tenant")["Charge ($)"] if not prev.empty else pd.Series(dtype=float)
+    card_cols = st.columns(len(cards))
+    for col, (_, row) in zip(card_cols, cards.iterrows()):
+        with col:
+            # Fixed-height top section so the People dropdowns line up across cards
+            with st.container(height=150, border=False):
+                if row["People"] == 0:
+                    st.metric(row["Site"], "Vacant")
+                    if not row["metered"]:
+                        st.caption("No meter yet")
+                    elif row["Own meter kWh"] > cfg.vacant_alert_kwh:
+                        st.caption(f"⚠️ own meter {row['Own meter kWh']:,.0f} kWh (added to shared shop)")
+                    else:
+                        st.caption(f"own meter {row['Own meter kWh']:,.1f} kWh")
+                else:
+                    delta = None
+                    if row["Site"] in prev_by_site.index and not whatif:
+                        delta = f"{signed_money(row['Charge ($)'] - float(prev_by_site[row['Site']]))} vs last cycle"
+                    st.metric(row["Site"], f"${row['Charge ($)']:,.2f}", delta=delta, delta_color="off")
+                    st.caption(f"{row['kWh (calc)']:,.0f} kWh")
+            real = int(row["Configured"])
+            options = [people_label(n) for n in sorted({0, 1, 2, real})]
+            shown = people_label(int(row["People"]))
+            st.selectbox("People", options, index=options.index(shown) if shown in options else options.index(people_label(real)), key=ppl_key(row["Site"]))
 
     st.markdown("#### Where the farm's power goes")
     st.caption(
@@ -228,7 +300,7 @@ with tab_overview:
 
 # ================================================================ TENANTS
 with tab_tenants:
-    st.markdown("#### What makes up each bill")
+    st.markdown("#### What makes up each bill" + (" (what-if headcounts)" if whatif else ""))
     if cur.empty:
         st.info("No occupied sites this cycle.")
     else:
@@ -248,7 +320,7 @@ with tab_tenants:
         )
         st.download_button(
             "Download this cycle (CSV)", table.to_csv(index=False).encode("utf-8"),
-            file_name=f"tenant-charges-{ym}.csv", mime="text/csv",
+            file_name=f"tenant-charges-{ym}{'-whatif' if whatif else ''}.csv", mime="text/csv",
         )
 
     st.markdown("#### One tenant over time")
@@ -289,6 +361,32 @@ with tab_farm:
     else:
         st.plotly_chart(C.calendar_heatmap(daily, pd.Timestamp(start_day)), theme=None, width="stretch")
         st.caption("Each square is one day; brighter means more kWh. Unusual bright days stand out.")
+
+    st.markdown("#### What's on each hub")
+    kind = st.segmented_control("Chart", options=["Bar", "Pie"], default="Bar", key="hub_chart_kind") or "Bar"
+    st.caption(
+        "Each circuit on the hub's panel for this cycle. 'Everything else' is power on the hub that isn't on a monitored "
+        "circuit, such as a sub-panel. A pie only shows the top five circuits; the bar shows them all."
+    )
+    HUB_NOTES = {
+        POLE_BARN_MAIN: "Most of the 'everything else' here is the Pole Barn Sub panel, which has its own hub below, plus shop loads without their own circuit.",
+        POLE_BARN_SUB: "Most of the 'everything else' here is the RV sites, which have their own hub above.",
+    }
+    hub_defs = [(RV_SITES, "RV Sites"), (GROW_BARN, "Grow Barn"), (POLE_BARN_MAIN, "Pole Barn Main"), (POLE_BARN_SUB, "Pole Barn Sub")]
+    for pair in (hub_defs[:2], hub_defs[2:]):
+        hub_cols = st.columns(2)
+        for hub_col, (hub_gid, fallback) in zip(hub_cols, pair):
+            with hub_col:
+                hub_name = device_name_map.get(hub_gid, fallback)
+                st.subheader(hub_name)
+                hub_df, hub_main, hub_total = c_channels(hub_gid, period_start, period_end)
+                if hub_df.empty:
+                    st.info("No circuit data this cycle.")
+                    continue
+                st.plotly_chart(C.channel_chart(hub_df, hub_main, kind), theme=None, width="stretch")
+                st.caption(f"{(hub_main if hub_main > 0 else hub_total):,.0f} kWh on this hub · circuits add up to {hub_total:,.0f} kWh")
+                if hub_gid in HUB_NOTES and hub_main > hub_total + 0.5:
+                    st.caption(HUB_NOTES[hub_gid])
 
     st.markdown("#### All devices")
     device_totals = q(

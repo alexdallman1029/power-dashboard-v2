@@ -265,3 +265,67 @@ def monthly_bar_chart(months: list[str], values: list[float], unit: str = "kWh")
     fig.update_layout(bargap=0.5, uniformtext_minsize=10, uniformtext_mode="show")
     fig.update_yaxes(title_text=unit)
     return _base(fig, height=260, legend=False)
+
+
+# ------------------------------------------------------------------ hubs
+REST_LABEL = "Everything else on this hub"
+OTHER_LABEL = "Other circuits"
+PIE_SLOTS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"]  # canonical order, dark steps
+REST_COLOR = "#898781"
+OTHER_COLOR = "#5d5b57"
+
+
+def channel_chart(df: pd.DataFrame, main_kwh: float, kind: str = "Bar") -> go.Figure:
+    """Circuits on one Emporia hub. The part of the hub's Main reading that isn't on a monitored
+    circuit is shown as 'Everything else', so shares add up to the hub's real total."""
+    d = df[["Channel", "kWh"]].copy()
+    total_circuits = float(d["kWh"].sum())
+    rest = max(0.0, main_kwh - total_circuits) if main_kwh > 0 else 0.0
+    if rest > 0.5:
+        d = pd.concat([d, pd.DataFrame([{"Channel": REST_LABEL, "kWh": rest}])], ignore_index=True)
+    grand = float(d["kWh"].sum()) or 1.0
+    d["pct"] = d["kWh"] / grand * 100.0
+
+    if kind == "Pie":
+        circuits = d[d["Channel"] != REST_LABEL].sort_values("kWh", ascending=False)
+        top, tail = circuits.head(5), circuits.iloc[5:]
+        labels = top["Channel"].tolist()
+        values = top["kWh"].tolist()
+        colors = PIE_SLOTS[: len(labels)]
+        if len(tail):
+            labels.append(OTHER_LABEL)
+            values.append(float(tail["kWh"].sum()))
+            colors.append(OTHER_COLOR)
+        if rest > 0.5:
+            labels.append(REST_LABEL)
+            values.append(rest)
+            colors.append(REST_COLOR)
+        grand_pie = float(sum(values)) or 1.0
+        pct_text = [f"{v / grand_pie * 100:.0f}%" if v / grand_pie >= 0.04 else "" for v in values]  # label only readable slices
+        fig = go.Figure(
+            go.Pie(
+                labels=labels, values=values, hole=0.55, sort=False, direction="clockwise",
+                marker=dict(colors=colors, line=dict(color=SURFACE, width=2)),
+                text=pct_text, textinfo="text", textposition="outside", textfont=dict(color=INK2, size=12),
+                domain=dict(x=[0.0, 0.58]), automargin=True,
+                hovertemplate="<b>%{label}</b><br>%{value:,.0f} kWh · %{percent:.1%}<extra></extra>",
+            )
+        )
+        _base(fig, height=300)  # then the pie-specific legend, so the shared one doesn't override it
+        fig.update_layout(legend=dict(orientation="v", x=0.62, y=0.5, xanchor="left", yanchor="middle", font=dict(color=INK2, size=12)))
+        return fig
+
+    d = d.sort_values("kWh", ascending=False)
+    colors = [REST_COLOR if c == REST_LABEL else ACCENT for c in d["Channel"]]
+    fig = go.Figure(
+        go.Bar(
+            y=d["Channel"], x=d["kWh"], orientation="h", marker=dict(color=colors, line=dict(width=0)),
+            text=[f"{k:,.0f} kWh · {p:.0f}%" for k, p in zip(d["kWh"], d["pct"])],
+            textposition="outside", cliponaxis=False, textfont=dict(color=INK2, size=12),
+            hovertemplate="<b>%{y}</b><br>%{x:,.1f} kWh<extra></extra>",
+        )
+    )
+    fig.update_yaxes(autorange="reversed", gridcolor="rgba(0,0,0,0)", tickfont=dict(color=INK2, size=12))
+    fig.update_xaxes(showgrid=False, showticklabels=False, range=[0, float(d["kWh"].max()) * 1.45])
+    fig.update_layout(bargap=0.4)
+    return _base(fig, height=max(130, 36 + 27 * len(d)), legend=False)

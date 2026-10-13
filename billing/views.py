@@ -17,7 +17,7 @@ from billing.compute import (
     tenant_charges_for_ym,
     vacant_site_usage,
 )
-from billing.config import load_config
+from billing.config import display_channel_name, load_config
 from billing.period import billing_period_for_ym
 from billing.utility import has_bill_tables, reconcile
 
@@ -49,6 +49,58 @@ def tenant_history(conn: sqlite3.Connection, months: list[str]) -> pd.DataFrame:
         df.insert(0, "ym", ym)
         frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def site_cards(conn: sqlite3.Connection, ym: str, people_override: dict | None = None) -> pd.DataFrame:
+    """One row per site (vacant ones included) for the tenant cards.
+
+    `People` is the headcount used (the what-if choice, else the real one from sites.toml),
+    `Configured` is the real one. Vacant sites have no charge but still show their own meter.
+    """
+    cfg = load_config()
+    p = _pool_inputs(conn, ym, people_override)
+    charges = tenant_charges_for_ym(conn, ym, people_override)
+    charges = charges.set_index("Tenant") if not charges.empty else charges
+    rows = []
+    for site in cfg.sites:
+        occupied = site.name in charges.index
+        rows.append(
+            {
+                "Site": site.name,
+                "People": p["site_people"][site.name],
+                "Configured": cfg.people(site, ym),
+                "Own meter kWh": p["site_kwh"][site.name],
+                "metered": site.device_gid is not None and bool(site.channel),
+                "Charge ($)": float(charges.loc[site.name, "Charge ($)"]) if occupied else None,
+                "kWh (calc)": float(charges.loc[site.name, "kWh (calc)"]) if occupied else None,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def channel_breakdown(conn: sqlite3.Connection, gid: int, start: dt.date, end: dt.date) -> tuple[pd.DataFrame, float, float]:
+    """Circuits on one Emporia hub: (table of Channel / kWh / Share %, Main kWh, circuits total).
+
+    Tenant channels are shown under their site names, never the people's names from Emporia.
+    """
+    cfg = load_config()
+    df = pd.read_sql_query(
+        "select channel_num, coalesce(nullif(trim(channel_name), ''), 'Unnamed channel ' || channel_num) as Channel, "
+        "sum(kwh) as kWh from usage_daily where device_gid = ? and day >= ? and day <= ? and channel_num != 0 "
+        "group by channel_num, Channel",
+        conn,
+        params=(int(gid), start.isoformat(), end.isoformat()),
+    )
+    main = conn.execute(
+        "select sum(kwh) from usage_daily where device_gid = ? and channel_num = 0 and day >= ? and day <= ?",
+        (int(gid), start.isoformat(), end.isoformat()),
+    ).fetchone()[0] or 0.0
+    df = df[df["kWh"] > 0.05].copy()
+    df["Channel"] = df["Channel"].map(lambda n: display_channel_name(cfg, int(gid), n))
+    df = df.sort_values("kWh", ascending=False)[["Channel", "kWh"]].reset_index(drop=True)
+    total = float(df["kWh"].sum())
+    df["Share %"] = df["kWh"] / total * 100.0 if total else 0.0
+    return df, float(main), total
 
 
 def bill_breakdown_dollars(df: pd.DataFrame, rate: float) -> pd.DataFrame:
