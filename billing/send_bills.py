@@ -173,6 +173,8 @@ def main() -> int:
             raise RuntimeError(f"No phone number for: {missing}")
 
     print(f"Billing month {ym} ({'SEND' if args.send else 'DRY RUN'}, mode {args.mode})")
+    print("Dashboard link: " + ("set, will be added to the owner text" if dashboard_url
+                                else "NOT set (add a repository VARIABLE named DASHBOARD_URL under Settings > Secrets and variables > Actions > Variables)"))
     failed = []
     if owner_body:
         print(f"- Owner:\n{owner_body}")
