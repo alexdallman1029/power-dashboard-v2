@@ -1,14 +1,25 @@
 name: Monthly tenant bills
 
+# Two scheduled runs each month:
+#   - the day before the 1st: a preview text to the owners with every tenant's amount
+#   - the 1st: the tenant texts
+# Scheduled runs only send when the repo variable SEND_ENABLED is "true"; otherwise they print
+# a dry run in the log. To stop the tenant texts after seeing the preview, set SEND_ENABLED to false.
 on:
   schedule:
-    - cron: "0 18 1 * *"   # 1st of the month, 18:00 UTC (11 AM Pacific), after the daily data pulls
+    - cron: "0 18 28-31 * *"   # owners' preview; the job only acts on the day before the 1st
+    - cron: "0 18 1 * *"       # tenant texts, 18:00 UTC (11 AM Pacific)
   workflow_dispatch:
     inputs:
       send:
         description: "Actually send texts? (false = dry run, prints messages only)"
         type: boolean
         default: false
+      mode:
+        description: "What to send"
+        type: choice
+        options: [preview, tenants, all]
+        default: preview
       ym:
         description: "Billing month YYYY-MM (blank = the cycle that last closed)"
         default: ""
@@ -36,11 +47,23 @@ jobs:
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
           TENANT_PHONES: ${{ secrets.TENANT_PHONES }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
         run: |
           SEND_FLAG=""
-          # Scheduled runs send only once SEND_ENABLED=true is set as a repo variable
+          MODE="${{ github.event.inputs.mode }}"
           if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Scheduled runs send only once SEND_ENABLED=true is set as a repo variable
             [ "${{ vars.SEND_ENABLED }}" = "true" ] && SEND_FLAG="--send"
+            if [ "${{ github.event.schedule }}" = "0 18 1 * *" ]; then
+              MODE="tenants"
+            else
+              # the preview cron fires on the 28th-31st; only the day before the 1st counts
+              if [ "$(date -u -d tomorrow +%d)" != "01" ]; then
+                echo "Not the day before the 1st; nothing to do."
+                exit 0
+              fi
+              MODE="preview"
+            fi
           else
             [ "${{ github.event.inputs.send }}" = "true" ] && SEND_FLAG="--send"
           fi
@@ -48,4 +71,5 @@ jobs:
           [ -n "${{ github.event.inputs.ym }}" ] && YM_FLAG="--ym ${{ github.event.inputs.ym }}"
           ONLY_FLAG=()
           [ -n "${{ github.event.inputs.only }}" ] && ONLY_FLAG=(--only "${{ github.event.inputs.only }}")
-          python -m billing.send_bills $SEND_FLAG $YM_FLAG "${ONLY_FLAG[@]}"
+          echo "mode: ${MODE:-all}  send: ${SEND_FLAG:-no (dry run)}"
+          python -m billing.send_bills $SEND_FLAG --mode "${MODE:-all}" $YM_FLAG "${ONLY_FLAG[@]}"
