@@ -10,7 +10,10 @@ on:
         type: boolean
         default: false
       ym:
-        description: "Billing month YYYY-MM (blank = period that just closed)"
+        description: "Billing month YYYY-MM (blank = the cycle that last closed)"
+        default: ""
+      only:
+        description: 'Only send to these, comma separated (blank = everyone). For a one-text test use: Owner'
         default: ""
 
 concurrency:
@@ -43,4 +46,6 @@ jobs:
           fi
           YM_FLAG=""
           [ -n "${{ github.event.inputs.ym }}" ] && YM_FLAG="--ym ${{ github.event.inputs.ym }}"
-          python -m billing.send_bills $SEND_FLAG $YM_FLAG
+          ONLY_FLAG=()
+          [ -n "${{ github.event.inputs.only }}" ] && ONLY_FLAG=(--only "${{ github.event.inputs.only }}")
+          python -m billing.send_bills $SEND_FLAG $YM_FLAG "${ONLY_FLAG[@]}"

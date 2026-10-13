@@ -4,6 +4,7 @@ Usage:
     python -m billing.send_bills                 # dry run for the cycle that last closed
     python -m billing.send_bills --ym 2026-01    # dry run for a specific billing month
     python -m billing.send_bills --send          # actually send
+    python -m billing.send_bills --send --only Owner          # send just one message (a careful test)
 
 Environment (only needed with --send):
     TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
@@ -133,11 +134,20 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ym", help="billing month YYYY-MM (default: the cycle that last closed)")
     ap.add_argument("--send", action="store_true", help="actually send (default is dry run)")
+    ap.add_argument("--only", help='only these recipients, comma separated, e.g. "Owner" or "Owner,East Site"')
     args = ap.parse_args()
 
     ym = args.ym or last_closed_billing_ym(dt.date.today())
     msgs = build_messages(ym)
     owner_body = build_owner_message(ym)
+    if args.only:
+        wanted = {n.strip() for n in args.only.split(",") if n.strip()}
+        unknown = wanted - {m["tenant"] for m in msgs} - {"Owner"}
+        if unknown:
+            raise RuntimeError(f"--only names not found among this month's recipients: {sorted(unknown)}")
+        msgs = [m for m in msgs if m["tenant"] in wanted]
+        if "Owner" not in wanted:
+            owner_body = None
 
     phones = json.loads(os.environ.get("TENANT_PHONES", "{}")) if args.send else {}
     if args.send:
