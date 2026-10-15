@@ -1,0 +1,23 @@
+name: Ambient Weather probe
+
+# Diagnostic only, read-only: confirms the keys work, lists which fields your station reports,
+# and finds how far back history goes. Prints no location, address, MAC or keys.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Probe Ambient Weather
+        env:
+          AMBIENT_API_KEY: ${{ secrets.AMBIENT_API_KEY }}
+          AMBIENT_APPLICATION_KEY: ${{ secrets.AMBIENT_APPLICATION_KEY }}
+        run: python -m ingest.probe_ambient
