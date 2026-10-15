@@ -280,11 +280,11 @@ with tab_overview:
                     if not row["metered"]:
                         st.caption(f"{own:,.1f} kWh · vacant, no meter yet")
                     elif own > cfg.vacant_alert_kwh:
-                        st.caption(f"⚠️ {own:,.1f} kWh · vacant, not billed (added to shared shop)")
+                        st.caption(f"⚠️ {own:,.1f} kWh · vacant, no bill; split among the other sites")
                     elif own < 0.05:
                         st.caption(f"{own:,.1f} kWh · vacant, nothing used")
                     else:
-                        st.caption(f"{own:,.1f} kWh · vacant, not billed")
+                        st.caption(f"{own:,.1f} kWh · vacant, no bill; split among the other sites")
                 else:
                     delta = None
                     if row["Site"] in prev_by_site.index and not whatif:
