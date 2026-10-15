@@ -95,6 +95,55 @@ def test_backfill_writes_a_full_csv_and_hourly_rows():
     assert conn.execute("select count(*) from weather_hourly where readings = 12").fetchone()[0] == len(DATA) // 12
 
 
+
+
+def test_a_dropped_connection_is_retried_not_fatal():
+    import http.client
+    import urllib.error
+
+    attempts = {"n": 0}
+
+    class Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"[]"
+
+    def flaky(req, timeout=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise http.client.IncompleteRead(b"")   # the exact error that crashed the first long run
+        return Resp()
+
+    with mock.patch.object(amb.urllib.request, "urlopen", flaky), mock.patch.object(amb, "PAUSE", 0), \
+         mock.patch.object(amb.time, "sleep", lambda s: None):
+        status, data = amb.get("https://x", "/devices")
+    assert (status, data, attempts["n"]) == (200, [], 3)
+
+
+def test_a_failure_that_will_not_go_away_keeps_the_rows_already_fetched():
+    calls = {"n": 0}
+
+    def history(base, mac, end_ms=None, limit=288):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise RuntimeError("Ambient request kept failing after 6 tries (IncompleteRead)")
+        return fake_history(base, mac, end_ms, limit)
+
+    with mock.patch.object(amb, "history", history):
+        try:
+            amb.fetch_all("b", "m")
+            raise AssertionError("expected FetchInterrupted")
+        except amb.FetchInterrupted as e:
+            assert len(e.rows) == 576 and e.rows == sorted(e.rows, key=lambda r: r["dateutc"])
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

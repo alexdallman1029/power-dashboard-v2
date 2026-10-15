@@ -30,12 +30,15 @@ jobs:
           AMBIENT_APPLICATION_KEY: ${{ secrets.AMBIENT_APPLICATION_KEY }}
         run: python -m ingest.backfill_ambient "$RUNNER_TEMP/weather_5min_all_fields.csv.gz"
       - name: Keep every 5-minute reading (download from the run page)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: weather-5min-all-readings
           path: ${{ runner.temp }}/weather_5min_all_fields.csv.gz
+          if-no-files-found: warn
           retention-days: 90
       - name: Commit the hourly weather data
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

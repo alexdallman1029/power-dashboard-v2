@@ -6,6 +6,7 @@ The API allows roughly one request per second per key, so calls are paced.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import time
@@ -25,24 +26,38 @@ def _keys() -> dict:
     }
 
 
+ATTEMPTS = 6
+# Network hiccups: a dropped connection, a half-received reply, a timeout, or a reply cut off mid-way
+_TRANSIENT = (http.client.HTTPException, urllib.error.URLError, TimeoutError, ConnectionError, OSError, json.JSONDecodeError)
+
+
 def get(base: str, path: str, **params):
-    """GET {base}{path}; returns (HTTP status, parsed JSON or None). Retries politely on 429."""
+    """GET {base}{path}; returns (HTTP status, parsed JSON or None).
+
+    Retries with a growing pause on rate limiting (429), server errors (5xx) and network hiccups,
+    so one dropped connection in a thousand requests doesn't lose a long run.
+    """
     query = urllib.parse.urlencode({**_keys(), **{k: v for k, v in params.items() if v is not None}})
     url = f"{base}{path}?{query}"
-    for attempt in range(4):
+    for attempt in range(1, ATTEMPTS + 1):
         time.sleep(PAUSE)
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=60) as r:
                 body = r.read()
                 return r.status, json.loads(body) if body else None
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 3:
-                time.sleep(3 * (attempt + 1))
+            if (e.code == 429 or e.code >= 500) and attempt < ATTEMPTS:
+                time.sleep(3 * attempt)
                 continue
             try:
                 return e.code, json.loads(e.read() or b"null")
-            except ValueError:
+            except (ValueError, http.client.HTTPException, OSError):
                 return e.code, None
+        except _TRANSIENT as e:
+            if attempt == ATTEMPTS:
+                raise RuntimeError(f"Ambient request kept failing after {ATTEMPTS} tries ({type(e).__name__})") from e
+            print(f"  network hiccup ({type(e).__name__}); retrying", flush=True)
+            time.sleep(3 * attempt)
     return 429, None
 
 
@@ -68,6 +83,14 @@ def history(base: str, mac: str, end_ms: int | None = None, limit: int = 288) ->
 HOP_MS = 24 * 3600 * 1000  # a request only looks back about a day from its endDate
 
 
+class FetchInterrupted(RuntimeError):
+    """A request kept failing; `rows` holds the readings fetched before that."""
+
+    def __init__(self, rows: list[dict], message: str):
+        super().__init__(message)
+        self.rows = rows
+
+
 def fetch_all(
     base: str, mac: str, stop_before_ms: int | None = None, max_pages: int = 8000, max_empty_days: int = 150
 ) -> list[dict]:
@@ -82,7 +105,11 @@ def fetch_all(
     end_ms = None
     empty_days = 0
     for page in range(1, max_pages + 1):
-        batch = [r for r in history(base, mac, end_ms=end_ms) if r.get("dateutc") is not None]
+        try:
+            batch = [r for r in history(base, mac, end_ms=end_ms) if r.get("dateutc") is not None]
+        except RuntimeError as e:
+            # keep everything fetched so far; the caller decides whether to save it
+            raise FetchInterrupted(sorted(rows.values(), key=lambda r: r["dateutc"]), str(e)) from e
         if not batch:
             if end_ms is None:
                 end_ms = int(time.time() * 1000)
