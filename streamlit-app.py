@@ -244,7 +244,7 @@ with tab_overview:
     d = pct_change(emp_now, emp_prev)
     k1.metric("Farm power (Emporia)", f"{emp_now:,.0f} kWh", delta=None if d is None else f"{d:+.0f}% vs last cycle", delta_color="off")
     k2.metric("Billed to tenants", f"${billed_now:,.2f}", delta=f"{signed_money(billed_now - billed_prev)} vs last cycle", delta_color="off")
-    k3.metric("Not billed to tenants", f"{unbilled_kwh:,.0f} kWh", help="Grow barn plus the owners' share of shared power")
+    k3.metric("Not billed to tenants", f"{unbilled_kwh:,.0f} kWh", help="Grow barn, power at vacant sites, and the owners' share of shared power")
     if not rec.empty:
         latest = rec.sort_values("Bill date").iloc[-1]
         k4.metric("Latest utility bill (farm meter)", f"${latest['Farm $']:,.2f}", help=f"Bill dated {latest['Bill date']}: {latest['Farm kWh']:,.0f} kWh")
@@ -280,11 +280,11 @@ with tab_overview:
                     if not row["metered"]:
                         st.caption(f"{own:,.1f} kWh · vacant, no meter yet")
                     elif own > cfg.vacant_alert_kwh:
-                        st.caption(f"⚠️ {own:,.1f} kWh · vacant, no bill; split among the other sites")
+                        st.caption(f"⚠️ {own:,.1f} kWh · vacant, no bill; counted in the owners' share")
                     elif own < 0.05:
                         st.caption(f"{own:,.1f} kWh · vacant, nothing used")
                     else:
-                        st.caption(f"{own:,.1f} kWh · vacant, no bill; split among the other sites")
+                        st.caption(f"{own:,.1f} kWh · vacant, no bill; counted in the owners' share")
                 else:
                     delta = None
                     if row["Site"] in prev_by_site.index and not whatif:

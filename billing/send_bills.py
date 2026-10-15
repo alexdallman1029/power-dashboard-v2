@@ -51,7 +51,7 @@ def build_messages(ym: str) -> list[dict]:
         last_day = conn.execute("select max(day) from usage_daily").fetchone()[0]
         results = tenant_charges_for_ym(conn, ym)
         for site, kwh in vacant_site_usage(conn, ym).items():
-            print(f"::warning::{site} is vacant but metered {kwh:,.1f} kWh (added to shared shop)")
+            print(f"::warning::{site} is vacant but metered {kwh:,.1f} kWh (counted in the owners' share)")
     finally:
         conn.close()
 
@@ -109,7 +109,8 @@ def build_owner_message(ym: str, tenant_msgs: list[dict], preview: bool = False,
     lines.append(f"Total ${sum(m['amount'] for m in tenant_msgs):,.2f}.")
     lines.append(
         f"Not billed to tenants: {owner['total_kwh']:,.0f} kWh (~${owner['total_cost']:,.2f}) = "
-        f"your share of shared power {owner['kwh']:,.0f} kWh + grow barn {owner['grow_kwh']:,.0f} kWh."
+        f"your share of shared power {owner['kwh']:,.0f} kWh + vacant sites {owner['vacant_kwh']:,.0f} kWh "
+        f"+ grow barn {owner['grow_kwh']:,.0f} kWh."
     )
     if preview:
         lines.append("Tenant texts go out on the 1st.")

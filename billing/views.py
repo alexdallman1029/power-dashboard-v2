@@ -149,6 +149,7 @@ def farm_ledger(conn: sqlite3.Connection, months: list[str]) -> pd.DataFrame:
         owners = p["shared_shop_kwh"] * p["unbilled_people"] / everyone if everyone else 0.0
         if t.empty:  # nobody billed: the shared shop is all the owners'
             owners = p["shared_shop_kwh"]
+        owners += p["vacant_kwh"]  # power metered at vacant sites is the owners', not the tenants'
         grow = (
             _device_total_pref_main(conn, cfg.grow_barn_device, s, e)
             if cfg.grow_barn_device is not None
@@ -335,7 +336,7 @@ def needs_attention(conn: sqlite3.Connection, ym: str, today: dt.date | None = N
     notes: list[tuple[str, str]] = []
 
     for site, kwh in vacant_site_usage(conn, ym).items():
-        notes.append(("warning", f"{site} is marked vacant but its meter used {kwh:,.0f} kWh this cycle. It was added to the shared shop."))
+        notes.append(("warning", f"{site} is marked vacant but its meter used {kwh:,.0f} kWh this cycle. It counts toward your share, not any tenant's bill."))
 
     row = conn.execute("select value from kv_store where key = 'last_ingested_at_utc'").fetchone()
     if row:

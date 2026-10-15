@@ -10,7 +10,7 @@
 rate_per_kwh = 0.13   # $ per kWh
 monthly_fee  = 5.43   # flat fee added to each occupied site's bill
 base_kwh     = 45.0   # fixed base load shared each month (before dividing)
-# Usage at an EMPTY site is added to the shared shop (so it isn't lost), but if it
+# Usage at an EMPTY site goes to the owners' share (never into tenant bills), and if it
 # is above this many kWh in a billing month the dashboard and texts job flag it.
 vacant_alert_kwh = 5.0
 
@@ -21,7 +21,7 @@ vacant_alert_kwh = 5.0
 #  Each site pays (its people) x (the per-person share).
 #  A vacant site (people = 0) is not billed and not counted, so
 #  everyone else's share goes up automatically. Any power still metered at a
-#  vacant site is added to the shared shop and flagged (see vacant_alert_kwh).
+#  vacant site is counted in the owners' share and flagged (see vacant_alert_kwh).
 # ------------------------------------------------------------
 
 # ------------------------------------------------------------

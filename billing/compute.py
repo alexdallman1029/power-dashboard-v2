@@ -70,9 +70,8 @@ def _site_kwh(conn: sqlite3.Connection, billing_ym: str) -> dict[str, float]:
 def vacant_site_usage(conn: sqlite3.Connection, billing_ym: str) -> dict[str, float]:
     """Metered kWh at sites with nobody in them, when above the alert threshold.
 
-    That usage is added to the shared shop (see tenant_charges_for_ym) so the
-    landlord isn't left covering it, but it usually means something is on that
-    shouldn't be -- worth finding out why.
+    That usage is counted in the owners' share (see owner_share_for_ym), never in tenant
+    bills, but it usually means something is on that shouldn't be -- worth finding out why.
     """
     cfg = load_config()
     kwh = _site_kwh(conn, billing_ym)
@@ -103,34 +102,38 @@ def _pool_inputs(conn: sqlite3.Connection, billing_ym: str, people_override: dic
     occupied = [site for site in cfg.sites if site_people[site.name] > 0]
     vacant = [site for site in cfg.sites if site_people[site.name] == 0]
 
-    # Occupied sites on the pole barn main panel sit outside the sub-panel,
-    # so they are carved out of the shared shop.
-    on_main = sum(site_kwh[s_.name] for s_ in occupied if s_.device_gid == POLE_BARN_MAIN_GID)
-    # Metered use at vacant sites nobody is billed for goes into the shared shop
-    # (vacant main-panel sites are already left in it by the line above).
-    vacant_extra = sum(site_kwh[s_.name] for s_ in vacant if s_.device_gid != POLE_BARN_MAIN_GID)
+    # Sites on the pole barn main panel sit outside the sub-panel, so they are carved out of the
+    # shared shop whether or not anyone lives there.
+    on_main = sum(site_kwh[s_.name] for s_ in cfg.sites if s_.device_gid == POLE_BARN_MAIN_GID)
+    # Power metered at a VACANT site is not split among tenants: it is counted in the owners' share.
+    # (Vacant RV sites are already outside the kitchen/lounge, since that is sub-panel minus RV sites.)
+    vacant_kwh = sum(site_kwh[s_.name] for s_ in vacant)
 
     return dict(
         site_kwh=site_kwh,
         site_people=site_people,
         unbilled_people=cfg.unbilled(billing_ym),
         kitchen_lounge_kwh=pole_sub_total - rv_total,
-        shared_shop_kwh=max(0.0, pole_main_total - pole_sub_total - on_main) + vacant_extra,
+        shared_shop_kwh=max(0.0, pole_main_total - pole_sub_total - on_main),
         rate=cfg.rate_per_kwh,
         fee=cfg.monthly_fee,
         base_kwh=cfg.base_kwh,
+        vacant_kwh=vacant_kwh,
     )
 
 
 def tenant_charges_for_ym(
     conn: sqlite3.Connection, billing_ym: str, people_override: dict | None = None
 ) -> pd.DataFrame:
-    return calculate_site_charges(**_pool_inputs(conn, billing_ym, people_override))
+    inputs = _pool_inputs(conn, billing_ym, people_override)
+    inputs.pop("vacant_kwh")  # goes to the owners' share, not into any tenant's bill
+    return calculate_site_charges(**inputs)
 
 
 def owner_share_for_ym(conn: sqlite3.Connection, billing_ym: str) -> dict:
     """Farm power Emporia assigns to the owners rather than tenants, for a billing month:
-    the unbilled residents' share of the shared pools, plus the grow barn.
+    the unbilled residents' share of the shared pools, power metered at vacant sites, and the
+    grow barn.
 
     Base load and the shared shop are divided across ALL people, so the owners' portion is
     unbilled / (billed + unbilled) of those two pools. Dollars use the tenant kWh rate.
@@ -150,9 +153,10 @@ def owner_share_for_ym(conn: sqlite3.Connection, billing_ym: str) -> dict:
     )
     return {
         "kwh": kwh,                      # unbilled residents' share of base + shop
+        "vacant_kwh": p["vacant_kwh"],   # metered at sites nobody lives in
         "grow_kwh": grow,                # grow barn: farm power tenants never pay for
-        "total_kwh": kwh + grow,
-        "total_cost": (kwh + grow) * p["rate"],
+        "total_kwh": kwh + grow + p["vacant_kwh"],
+        "total_cost": (kwh + grow + p["vacant_kwh"]) * p["rate"],
         "unbilled_people": unbilled,
         "all_people": everyone,
         "pool_kwh": pool_kwh,
