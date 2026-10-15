@@ -273,13 +273,16 @@ with tab_overview:
             # Fixed-height top section so the People dropdowns line up across cards
             with st.container(height=150, border=False):
                 if row["People"] == 0:
-                    st.metric(row["Site"], "Vacant")
+                    # A vacant site shows what its own meter actually read, even when that is nothing
+                    st.metric(row["Site"], f"{row['Own meter kWh']:,.1f} kWh")
                     if not row["metered"]:
-                        st.caption("No meter yet")
+                        st.caption("Vacant · no meter yet")
                     elif row["Own meter kWh"] > cfg.vacant_alert_kwh:
-                        st.caption(f"⚠️ own meter {row['Own meter kWh']:,.0f} kWh (added to shared shop)")
+                        st.caption("⚠️ Vacant · usage added to the shared shop")
+                    elif row["Own meter kWh"] < 0.05:
+                        st.caption("Vacant · nothing used")
                     else:
-                        st.caption(f"own meter {row['Own meter kWh']:,.1f} kWh")
+                        st.caption("Vacant · own meter reading")
                 else:
                     delta = None
                     if row["Site"] in prev_by_site.index and not whatif:
