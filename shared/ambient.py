@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -62,3 +63,31 @@ def history(base: str, mac: str, end_ms: int | None = None, limit: int = 288) ->
     if status != 200 or not isinstance(data, list):
         raise RuntimeError(f"Ambient history request failed (HTTP {status})")
     return data
+
+
+def fetch_all(base: str, mac: str, stop_before_ms: int | None = None, max_pages: int = 4000) -> list[dict]:
+    """Page backward from now until the history runs out (or reaches stop_before_ms).
+
+    Each request returns up to 288 readings ending at `endDate`, newest first, so the next page
+    ends one millisecond before the oldest reading already held. Gaps (station offline) are skipped
+    automatically, because the API returns the newest readings before `endDate`.
+    """
+    rows: dict[int, dict] = {}
+    end_ms = None
+    for page in range(1, max_pages + 1):
+        batch = [r for r in history(base, mac, end_ms=end_ms) if r.get("dateutc") is not None]
+        if not batch:
+            break
+        added = 0
+        for r in batch:
+            if r["dateutc"] not in rows:
+                rows[r["dateutc"]] = r
+                added += 1
+        oldest = min(r["dateutc"] for r in batch)
+        if page == 1 or page % 50 == 0:
+            when = datetime.fromtimestamp(oldest / 1000, timezone.utc).strftime("%Y-%m-%d")
+            print(f"  page {page}: {len(rows):,} readings so far, back to {when}", flush=True)
+        if added == 0 or (stop_before_ms is not None and oldest <= stop_before_ms):
+            break
+        end_ms = oldest - 1
+    return sorted(rows.values(), key=lambda r: r["dateutc"])

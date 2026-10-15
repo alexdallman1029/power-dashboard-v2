@@ -1,0 +1,45 @@
+name: Ambient Weather backfill
+
+# One-time (safe to re-run): pulls the whole available history. Saves hourly values for the
+# dashboard and attaches EVERY 5-minute reading as a downloadable file (see the run's
+# "Artifacts" section) so you can keep it after cancelling the paid plan.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: data-updates
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Pull the full history
+        env:
+          AMBIENT_API_KEY: ${{ secrets.AMBIENT_API_KEY }}
+          AMBIENT_APPLICATION_KEY: ${{ secrets.AMBIENT_APPLICATION_KEY }}
+        run: python -m ingest.backfill_ambient "$RUNNER_TEMP/weather_5min_all_fields.csv.gz"
+      - name: Keep every 5-minute reading (download from the run page)
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-5min-all-readings
+          path: ${{ runner.temp }}/weather_5min_all_fields.csv.gz
+          retention-days: 90
+      - name: Commit the hourly weather data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/weather.sqlite
+          git diff --cached --quiet || git commit -m "Weather history backfill (hourly)"
+          git pull --rebase
+          git push
