@@ -102,6 +102,39 @@ def c_device_monthly(gid: int, months: tuple) -> pd.DataFrame:
         return V.device_monthly(conn, gid, list(months))
 
 
+@contextmanager
+def wdb():
+    conn = sqlite3.connect(V.WEATHER_DB)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=300)
+def c_wx_summary(ym: str) -> dict:
+    with wdb() as w:
+        return V.cycle_weather_summary(w, ym)
+
+
+@st.cache_data(ttl=300)
+def c_wx_daily(start: dt.date, end: dt.date) -> pd.DataFrame:
+    with wdb() as w:
+        return V.weather_daily(w, start, end)
+
+
+@st.cache_data(ttl=300)
+def c_wx_latest():
+    with wdb() as w:
+        return V.latest_conditions(w)
+
+
+@st.cache_data(ttl=300)
+def c_energy_vs_temp(gid: int, start: dt.date, end: dt.date) -> pd.DataFrame:
+    with db() as conn, wdb() as w:
+        return V.energy_vs_temp(conn, w, gid, start, end)
+
+
 @st.cache_data(ttl=300)
 def c_reconcile() -> pd.DataFrame:
     with db() as conn:
@@ -229,7 +262,7 @@ def pct_change(now: float, before: float):
     return None if not before else (now - before) / before * 100.0
 
 
-tab_overview, tab_tenants, tab_farm, tab_utility = st.tabs(["Overview", "Tenants", "Farm power", "Utility bills"])
+tab_overview, tab_tenants, tab_farm, tab_weather, tab_utility = st.tabs(["Overview", "Tenants", "Farm power", "Weather", "Utility bills"])
 
 # ================================================================ OVERVIEW
 with tab_overview:
@@ -443,6 +476,75 @@ with tab_farm:
         device_section(POLE_BARN_MAIN)
     with row2b:
         device_section(POLE_BARN_SUB)
+
+# ================================================================ WEATHER
+with tab_weather:
+    if not V.weather_available():
+        st.info("No weather data yet. Run the 'Ambient Weather backfill' workflow on GitHub.")
+    else:
+        now_wx = c_wx_latest()
+        if now_wx:
+            st.markdown("#### Latest reading")
+            w1, w2, w3, w4, w5 = st.columns(5)
+            w1.metric("Temperature", f"{now_wx['temp']:.0f}°F", help=f"Feels like {now_wx['feels']:.0f}°F")
+            w2.metric("Humidity", f"{now_wx['humidity']:.0f}%")
+            w3.metric("Wind", f"{now_wx['wind']:.0f} mph", help=f"Gusts to {now_wx['gust']:.0f} mph")
+            w4.metric("Rain, last 24 h", f"{now_wx['rain24']:.2f} in")
+            w5.metric("Sunlight", f"{now_wx['solar']:.0f} W/m²")
+            t_ = now_wx["when"]
+            st.caption(f"Hour starting {t_:%b} {t_.day}, {t_.hour % 12 or 12} {t_:%p} PT. Updated once a day with the rest of the data.")
+
+        st.markdown("#### This cycle vs the same cycle last year")
+        wsum = c_wx_summary(ym)
+        cur_w, ly_w = wsum["now"], wsum["last_year"]
+        if not cur_w:
+            st.info("No weather recorded for this cycle.")
+        else:
+            def vs(key, unit, digits=0):
+                if not ly_w:
+                    return None
+                diff = cur_w[key] - ly_w[key]
+                return f"{'+' if diff >= 0 else '-'}{abs(diff):.{digits}f}{unit} vs last year"
+
+            x1, x2, x3, x4, x5 = st.columns(5)
+            x1.metric("Average temp", f"{cur_w['avg']:.1f}°F", delta=vs("avg", "°F", 1), delta_color="off")
+            x2.metric("Hottest", f"{cur_w['high']:.0f}°F", delta=vs("high", "°F"), delta_color="off")
+            x3.metric("Coldest", f"{cur_w['low']:.0f}°F", delta=vs("low", "°F"), delta_color="off")
+            x4.metric("Rain", f"{cur_w['rain']:.1f} in", delta=vs("rain", " in", 1), delta_color="off")
+            x5.metric("Sunlight", f"{cur_w['solar']:.0f} W/m²", delta=vs("solar", "", 0), delta_color="off")
+            if in_progress:
+                st.caption(f"This cycle is still in progress ({cur_w['days']} days so far), so it isn't a fair comparison with a full cycle last year.")
+
+        wdaily = c_wx_daily(period_start, period_end)
+        wdaily = wdaily[wdaily["Hours"] >= 12] if not wdaily.empty else wdaily
+        if not wdaily.empty:
+            st.markdown("#### Temperature and rain, day by day")
+            st.plotly_chart(C.temp_range_chart(wdaily), theme=None, width="stretch")
+            st.plotly_chart(C.rain_chart(wdaily), theme=None, width="stretch")
+
+        st.markdown("#### Does the weather drive your power use?")
+        st.caption(
+            "Each dot is one day over the past year: the day's average outdoor temperature across, kWh used up. "
+            "A downward slope means colder days use more power."
+        )
+        wx_devices = {"Pole barn (main)": POLE_BARN_MAIN, "RV sites": RV_SITES, "Grow barn": GROW_BARN}
+        wx_pick = st.selectbox("Power use to compare", list(wx_devices.keys()), key="wx_device")
+        scatter_end = min(period_end, last_date) if last_date else period_end
+        scatter_df = c_energy_vs_temp(wx_devices[wx_pick], scatter_end - dt.timedelta(days=364), scatter_end)
+        if len(scatter_df) < 20:
+            st.info("Not enough days with both power and weather data yet.")
+        else:
+            fig_sc, r_val, per10 = C.energy_temp_scatter(scatter_df, wx_pick)
+            st.plotly_chart(fig_sc, theme=None, width="stretch")
+            strength = "strong" if abs(r_val) >= 0.7 else "moderate" if abs(r_val) >= 0.4 else "weak"
+            direction = "cooler" if r_val < 0 else "warmer"
+            st.caption(
+                f"{wx_pick}: a {strength} link (correlation {r_val:+.2f}, from {len(scatter_df)} days). "
+                f"On average, each 10°F {'drop' if per10 < 0 else 'rise'} in temperature goes with about {abs(per10):,.0f} kWh "
+                f"{'more' if per10 < 0 else 'more'} per day; {direction} days use more." if abs(r_val) >= 0.4 else
+                f"{wx_pick}: only a {strength} link with temperature (correlation {r_val:+.2f}, from {len(scatter_df)} days), "
+                "so weather isn't what mainly drives it."
+            )
 
 # ============================================================ UTILITY BILLS
 with tab_utility:

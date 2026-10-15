@@ -357,3 +357,91 @@ def needs_attention(conn: sqlite3.Connection, ym: str, today: dt.date | None = N
             if age > 45:
                 notes.append(("info", f"The newest utility bill on file is {age} days old."))
     return notes
+
+
+# ------------------------------------------------------------------ weather
+WEATHER_DB = "data/weather.sqlite"
+PACIFIC_TZ = "America/Los_Angeles"
+
+
+def weather_available(path: str = WEATHER_DB) -> bool:
+    import os
+
+    return os.path.exists(path)
+
+
+def weather_daily(wconn: sqlite3.Connection, start: dt.date, end: dt.date, tz: str = PACIFIC_TZ) -> pd.DataFrame:
+    """Daily weather from the hourly table, for days start..end inclusive.
+
+    tz="America/Los_Angeles" gives local days for weather charts; tz="UTC" matches the day
+    boundaries of the energy data (usage_daily), so the two can be lined up exactly.
+    """
+    lo = (pd.Timestamp(start) - pd.Timedelta(days=1)).strftime("%Y-%m-%d 00:00")
+    hi = (pd.Timestamp(end) + pd.Timedelta(days=2)).strftime("%Y-%m-%d 00:00")
+    h = pd.read_sql_query(
+        "select * from weather_hourly where hour_utc >= ? and hour_utc < ?", wconn, params=(lo, hi)
+    )
+    if h.empty:
+        return pd.DataFrame()
+    t = pd.to_datetime(h["hour_utc"], utc=True).dt.tz_convert(tz)
+    h["day"] = t.dt.tz_localize(None).dt.normalize()
+    h = h[(h["day"] >= pd.Timestamp(start)) & (h["day"] <= pd.Timestamp(end))]
+    g = h.groupby("day")
+    out = pd.DataFrame(
+        {
+            "Hours": g["hour_utc"].count(),
+            "High °F": g["temp_f_max"].max(),
+            "Low °F": g["temp_f_min"].min(),
+            "Avg °F": g["temp_f_avg"].mean(),
+            "Rain in": g["rain_in"].sum(),
+            "Wind mph": g["wind_mph_avg"].mean(),
+            "Gust mph": g["gust_mph_max"].max(),
+            "Humidity %": g["humidity_avg"].mean(),
+            "Solar W/m²": g["solar_wm2_avg"].mean(),
+        }
+    ).reset_index()
+    return out
+
+
+def cycle_weather_summary(wconn: sqlite3.Connection, ym: str) -> dict:
+    """Weather for a billing cycle, and for the same cycle a year earlier."""
+
+    def one(label_ym: str) -> dict | None:
+        s, e = billing_period_for_ym(label_ym)
+        d = weather_daily(wconn, s, e)
+        d = d[d["Hours"] >= 20] if not d.empty else d
+        if d.empty:
+            return None
+        return {
+            "days": len(d), "avg": float(d["Avg °F"].mean()), "high": float(d["High °F"].max()),
+            "low": float(d["Low °F"].min()), "rain": float(d["Rain in"].sum()),
+            "solar": float(d["Solar W/m²"].mean()),
+        }
+
+    return {"now": one(ym), "last_year": one(shift_month(ym, -12))}
+
+
+def latest_conditions(wconn: sqlite3.Connection) -> dict | None:
+    r = wconn.execute(
+        "select hour_utc, temp_f_avg, feels_like_f, humidity_avg, wind_mph_avg, gust_mph_max, rain_in, solar_wm2_avg "
+        "from weather_hourly where temp_f_avg is not null order by hour_utc desc limit 1"
+    ).fetchone()
+    if not r:
+        return None
+    local = pd.Timestamp(r[0], tz="UTC").tz_convert(PACIFIC_TZ)
+    rain24 = wconn.execute(
+        "select coalesce(sum(rain_in), 0) from weather_hourly where hour_utc > ?",
+        ((pd.Timestamp(r[0]) - pd.Timedelta(hours=24)).strftime("%Y-%m-%d %H:00"),),
+    ).fetchone()[0]
+    return {"when": local, "temp": r[1], "feels": r[2], "humidity": r[3], "wind": r[4], "gust": r[5],
+            "rain24": float(rain24), "solar": r[7]}
+
+
+def energy_vs_temp(conn: sqlite3.Connection, wconn: sqlite3.Connection, gid: int, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """Daily kWh for a device against that day's average outdoor temperature (UTC days, so both match)."""
+    e = daily_device(conn, gid, start, end)
+    w = weather_daily(wconn, start, end, tz="UTC")
+    if e.empty or w.empty:
+        return pd.DataFrame()
+    m = e.merge(w[["day", "Avg °F", "Hours", "Rain in"]], on="day")
+    return m[(m["Hours"] >= 20) & (m["kWh"] > 0)].reset_index(drop=True)

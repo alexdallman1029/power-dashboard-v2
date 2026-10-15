@@ -329,3 +329,61 @@ def channel_chart(df: pd.DataFrame, main_kwh: float, kind: str = "Bar") -> go.Fi
     fig.update_xaxes(showgrid=False, showticklabels=False, range=[0, float(d["kWh"].max()) * 1.45])
     fig.update_layout(bargap=0.4)
     return _base(fig, height=max(130, 36 + 27 * len(d)), legend=False)
+
+
+# ------------------------------------------------------------------ weather
+def temp_range_chart(d: pd.DataFrame) -> go.Figure:
+    """Each day's low-to-high temperature as a band, with the day's average as a line."""
+    fig = go.Figure()
+    edge = "rgba(57,135,229,0.6)"
+    fig.add_trace(go.Scatter(x=d["day"], y=d["Low °F"], mode="lines", line=dict(width=1, color=edge), showlegend=False,
+                             hoverinfo="skip"))
+    fig.add_trace(go.Scatter(
+        x=d["day"], y=d["High °F"], mode="lines", line=dict(width=1, color=edge), fill="tonexty", fillcolor="rgba(57,135,229,0.28)",
+        name="Daily low to high", customdata=d[["Low °F"]],
+        hovertemplate="%{x|%b %-d}<br>High %{y:.0f}°F · Low %{customdata[0]:.0f}°F<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=d["day"], y=d["Avg °F"], mode="lines", name="Daily average", line=dict(color=ACCENT, width=2),
+        hovertemplate="%{x|%b %-d}<br>Average %{y:.0f}°F<extra></extra>",
+    ))
+    fig.update_yaxes(title_text="°F")
+    fig.update_xaxes(tickformat="%b %-d")
+    return _base(fig, height=300)
+
+
+def rain_chart(d: pd.DataFrame) -> go.Figure:
+    """Rain per day (a single series: no legend)."""
+    fig = go.Figure(
+        go.Bar(x=d["day"], y=d["Rain in"], marker=dict(color=ACCENT, line=dict(width=0)),
+               hovertemplate="%{x|%b %-d}: %{y:.2f} in<extra></extra>")
+    )
+    fig.update_layout(bargap=0.35)
+    fig.update_yaxes(title_text="inches per day", rangemode="tozero")
+    fig.update_xaxes(tickformat="%b %-d")
+    return _base(fig, height=240, legend=False)
+
+
+def energy_temp_scatter(m: pd.DataFrame, label: str) -> tuple[go.Figure, float, float]:
+    """Daily kWh against the day's average temperature, with a straight-line fit.
+
+    Returns the figure, the correlation r, and kWh change per +10°F (the line's slope x 10).
+    """
+    import numpy as np
+
+    x, y = m["Avg °F"].to_numpy(), m["kWh"].to_numpy()
+    slope, intercept = np.polyfit(x, y, 1)
+    r = float(np.corrcoef(x, y)[0, 1])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=y, mode="markers", name="One day",
+        marker=dict(size=7, color=ACCENT, opacity=0.6, line=dict(color=SURFACE, width=1)),
+        customdata=m["day"].dt.strftime("%b %-d, %Y"),
+        hovertemplate="%{customdata}<br>%{x:.0f}°F average<br>%{y:,.1f} kWh<extra></extra>",
+    ))
+    xs = np.array([x.min(), x.max()])
+    fig.add_trace(go.Scatter(x=xs, y=slope * xs + intercept, mode="lines", name="Trend",
+                             line=dict(color=INK2, width=2, dash="dash"), hoverinfo="skip"))
+    fig.update_xaxes(title_text="Average outdoor temperature that day (°F)")
+    fig.update_yaxes(title_text=f"{label}, kWh per day", rangemode="tozero")
+    return _base(fig, height=340), r, float(slope * 10)
