@@ -27,8 +27,45 @@ DATA = [
 
 
 def fake_history(base, mac, end_ms=None, limit=288):
+    """Behaves like Ambient appears to: only readings within about a day before endDate come back,
+    so a request whose window falls inside an outage returns nothing."""
+    end = end_ms if end_ms is not None else max(TIMES) + 1
+    pool = [r for r in DATA if end - limit * STEP < r["dateutc"] <= end]
+    return sorted(pool, key=lambda r: -r["dateutc"])[:limit]
+
+
+def fake_history_newest_first(base, mac, end_ms=None, limit=288):
+    """The simpler behavior: the newest `limit` readings at or before endDate, whatever the gap."""
     pool = [r for r in DATA if end_ms is None or r["dateutc"] <= end_ms]
     return sorted(pool, key=lambda r: -r["dateutc"])[:limit]
+
+
+def test_a_long_outage_does_not_end_the_history():
+    # a 20-day outage: windows inside it are empty, so the loop must step back until data resumes
+    gap_start = T0 + 864 * STEP
+    gap_end = gap_start + 20 * 288 * STEP
+    times = [T0 + i * STEP for i in range(864)] + [gap_end + i * STEP for i in range(864)]
+    data = [{"dateutc": t, "tempf": 50.0} for t in times]
+
+    def history(base, mac, end_ms=None, limit=288):
+        end = end_ms if end_ms is not None else max(times) + 1
+        return sorted([r for r in data if end - limit * STEP < r["dateutc"] <= end], key=lambda r: -r["dateutc"])[:limit]
+
+    with mock.patch.object(amb, "history", history), mock.patch.object(amb.time, "time", lambda: (max(times) + STEP) / 1000):
+        rows = amb.fetch_all("b", "m")
+    assert [r["dateutc"] for r in rows] == times
+
+
+def test_the_true_start_of_history_ends_the_search():
+    calls = []
+
+    def history(base, mac, end_ms=None, limit=288):
+        calls.append(end_ms)
+        return fake_history(base, mac, end_ms, limit)
+
+    with mock.patch.object(amb, "history", history):
+        amb.fetch_all("b", "m", max_empty_days=5)
+    assert len(calls) < 60  # stopped soon after the data ran out, not hundreds of requests later
 
 
 def test_fetch_all_gets_every_reading_in_order_across_an_outage():

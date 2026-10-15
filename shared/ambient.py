@@ -65,19 +65,35 @@ def history(base: str, mac: str, end_ms: int | None = None, limit: int = 288) ->
     return data
 
 
-def fetch_all(base: str, mac: str, stop_before_ms: int | None = None, max_pages: int = 4000) -> list[dict]:
+HOP_MS = 24 * 3600 * 1000  # a request only looks back about a day from its endDate
+
+
+def fetch_all(
+    base: str, mac: str, stop_before_ms: int | None = None, max_pages: int = 8000, max_empty_days: int = 150
+) -> list[dict]:
     """Page backward from now until the history runs out (or reaches stop_before_ms).
 
-    Each request returns up to 288 readings ending at `endDate`, newest first, so the next page
-    ends one millisecond before the oldest reading already held. Gaps (station offline) are skipped
-    automatically, because the API returns the newest readings before `endDate`.
+    Each request returns up to 288 readings ending at `endDate`, newest first, and appears to look
+    back only about a day, so the next page ends one millisecond before the oldest reading already
+    held. When a request comes back empty (the station was offline), step back one day at a time
+    until readings resume. After `max_empty_days` in a row with nothing, treat it as the true start.
     """
     rows: dict[int, dict] = {}
     end_ms = None
+    empty_days = 0
     for page in range(1, max_pages + 1):
         batch = [r for r in history(base, mac, end_ms=end_ms) if r.get("dateutc") is not None]
         if not batch:
-            break
+            if end_ms is None:
+                end_ms = int(time.time() * 1000)
+            empty_days += 1
+            if empty_days > max_empty_days or (stop_before_ms is not None and end_ms <= stop_before_ms):
+                break
+            end_ms -= HOP_MS
+            continue
+        if empty_days:
+            print(f"  readings resumed after {empty_days} empty day(s)", flush=True)
+            empty_days = 0
         added = 0
         for r in batch:
             if r["dateutc"] not in rows:
@@ -90,4 +106,7 @@ def fetch_all(base: str, mac: str, stop_before_ms: int | None = None, max_pages:
         if added == 0 or (stop_before_ms is not None and oldest <= stop_before_ms):
             break
         end_ms = oldest - 1
+    if rows:
+        first = datetime.fromtimestamp(min(rows) / 1000, timezone.utc).strftime("%Y-%m-%d")
+        print(f"  history starts {first}; stopped after {empty_days} empty day(s) in a row", flush=True)
     return sorted(rows.values(), key=lambda r: r["dateutc"])
