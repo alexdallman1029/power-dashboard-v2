@@ -112,15 +112,45 @@ def wdb():
 
 
 @st.cache_data(ttl=300)
+def c_wx_series(start: dt.date, end: dt.date, resolution: str, base_f: float) -> pd.DataFrame:
+    with wdb() as w:
+        return V.weather_series(w, start, end, resolution, base_f)
+
+
+@st.cache_data(ttl=300)
 def c_wx_summary(ym: str) -> dict:
     with wdb() as w:
         return V.cycle_weather_summary(w, ym)
 
 
 @st.cache_data(ttl=300)
-def c_wx_daily(start: dt.date, end: dt.date) -> pd.DataFrame:
+def c_wx_month_of_year(base_f: float) -> pd.DataFrame:
     with wdb() as w:
-        return V.weather_daily(w, start, end)
+        return V.weather_month_of_year(w, base_f)
+
+
+@st.cache_data(ttl=300)
+def c_climate() -> pd.DataFrame:
+    with wdb() as w:
+        return V.climate_monthly(w)
+
+
+@st.cache_data(ttl=300)
+def c_winters() -> pd.DataFrame:
+    with wdb() as w:
+        return V.winter_summary(w, V.climate_monthly(w))
+
+
+@st.cache_data(ttl=300)
+def c_wind_seasons() -> dict:
+    with wdb() as w:
+        return V.wind_by_season(w)
+
+
+@st.cache_data(ttl=300)
+def c_wx_bounds():
+    with wdb() as w:
+        return V.first_weather_time(w), V.latest_weather_time(w)
 
 
 @st.cache_data(ttl=300)
@@ -262,10 +292,12 @@ def pct_change(now: float, before: float):
     return None if not before else (now - before) / before * 100.0
 
 
-tab_overview, tab_tenants, tab_farm, tab_weather, tab_utility = st.tabs(["Overview", "Tenants", "Farm power", "Weather", "Utility bills"])
+tab_power, tab_weather, tab_billing = st.tabs(["Power", "Weather", "Billing"])
+with tab_billing:
+    tab_tenants, tab_utility = st.tabs(["Tenants", "Utility bills"])
 
-# ================================================================ OVERVIEW
-with tab_overview:
+# ================================================================ POWER
+with tab_power:
     prev_ledger = c_ledger((prev_ym,))
     lr = ledger[ledger["ym"] == ym].iloc[0]
     emp_now, emp_prev = float(lr["Emporia total"]), float(prev_ledger["Emporia total"].iloc[0])
@@ -284,51 +316,6 @@ with tab_overview:
     else:
         k4.metric("Latest utility bill (farm meter)", "–")
 
-    st.markdown("#### What each tenant owes")
-    if whatif:
-        wi_a, wi_b = st.columns([9, 3])
-        wi_a.info(
-            "What-if view: the charges below use the headcounts you picked, not the real occupancy. "
-            "Your texts and past bills are unchanged."
-        )
-
-        def _reset():
-            for _s in cfg.sites:
-                st.session_state.pop(ppl_key(_s.name), None)
-
-        wi_b.button("Reset to real occupancy", on_click=_reset)
-
-    cards = c_site_cards(ym, override_t)
-    prev_by_site = prev.set_index("Tenant")["Charge ($)"] if not prev.empty else pd.Series(dtype=float)
-    card_cols = st.columns(len(cards))
-    for col, (_, row) in zip(card_cols, cards.iterrows()):
-        with col:
-            # Fixed-height top section so the People dropdowns line up across cards
-            with st.container(height=150, border=False):
-                if row["People"] == 0:
-                    # Same layout as an occupied card: dollars on top, kWh underneath. For a vacant site
-                    # that is its own meter's actual usage at the tenant rate (no fee, nobody is billed).
-                    own = float(row["Own meter kWh"])
-                    st.metric(row["Site"], f"${own * cfg.rate_per_kwh:,.2f}")
-                    if not row["metered"]:
-                        st.caption(f"{own:,.1f} kWh · vacant, no meter yet")
-                    elif own > cfg.vacant_alert_kwh:
-                        st.caption(f"⚠️ {own:,.1f} kWh · vacant, no bill; counted in the owners' share")
-                    elif own < 0.05:
-                        st.caption(f"{own:,.1f} kWh · vacant, nothing used")
-                    else:
-                        st.caption(f"{own:,.1f} kWh · vacant, no bill; counted in the owners' share")
-                else:
-                    delta = None
-                    if row["Site"] in prev_by_site.index and not whatif:
-                        delta = f"{signed_money(row['Charge ($)'] - float(prev_by_site[row['Site']]))} vs last cycle"
-                    st.metric(row["Site"], f"${row['Charge ($)']:,.2f}", delta=delta, delta_color="off")
-                    st.caption(f"{row['kWh (calc)']:,.0f} kWh")
-            real = int(row["Configured"])
-            options = [people_label(n) for n in sorted({0, 1, 2, real})]
-            shown = people_label(int(row["People"]))
-            st.selectbox("People", options, index=options.index(shown) if shown in options else options.index(people_label(real)), key=ppl_key(row["Site"]))
-
     st.markdown("#### Where the farm's power goes")
     st.caption(
         "Bars: power Emporia measured, split by who it belongs to. Diamond: what the utility's farm meter recorded "
@@ -336,47 +323,7 @@ with tab_overview:
     )
     st.plotly_chart(C.ledger_chart(ledger), theme=None, width="stretch")
 
-# ================================================================ TENANTS
-with tab_tenants:
-    st.markdown("#### What makes up each bill" + (" (what-if headcounts)" if whatif else ""))
-    if cur.empty:
-        st.info("No occupied sites this cycle.")
-    else:
-        st.plotly_chart(
-            C.bill_breakdown_chart(V.bill_breakdown_dollars(cur, cfg.rate_per_kwh)), theme=None, width="stretch"
-        )
-        st.caption(
-            f"Each bill = your own metered kWh + a share of the kitchen/lounge, shop and base load, at \\${cfg.rate_per_kwh:.4f}/kWh, "
-            f"plus a \\${cfg.monthly_fee:.2f} monthly fee. Shares are split by people, and vacant sites aren't counted."
-        )
-        table = cur[["Tenant", "Own kWh", "Kitchen kWh", "Shop kWh", "Base kWh", "kWh (calc)", "Fee ($)", "Charge ($)"]].copy()
-        kwh_cols = ["Own kWh", "Kitchen kWh", "Shop kWh", "Base kWh", "kWh (calc)"]
-        st.dataframe(
-            table, hide_index=True, width="stretch",
-            column_config={c: st.column_config.NumberColumn(format="%.1f") for c in kwh_cols}
-            | {"Fee ($)": st.column_config.NumberColumn(format="$%.2f"), "Charge ($)": st.column_config.NumberColumn(format="$%.2f")},
-        )
-        st.download_button(
-            "Download this cycle (CSV)", table.to_csv(index=False).encode("utf-8"),
-            file_name=f"tenant-charges-{ym}{'-whatif' if whatif else ''}.csv", mime="text/csv",
-        )
 
-    st.markdown("#### One tenant over time")
-    sites_in_range = [s.name for s in cfg.sites if (all_tenants["Tenant"] == s.name).any()] if not all_tenants.empty else []
-    if sites_in_range:
-        pick_a, pick_b = st.columns([3, 9])
-        tenant_choice = pick_a.selectbox("Site", sites_in_range)
-        view = pick_b.segmented_control("View", options=["$", "kWh"], default="$")
-        site_obj = next(s for s in cfg.sites if s.name == tenant_choice)
-        vacant = [m for m in chart_months if cfg.people(site_obj, m) == 0]
-        st.plotly_chart(C.tenant_trend_chart(all_tenants, tenant_choice, view or "$", vacant), theme=None, width="stretch")
-
-    st.markdown("#### Who lived where")
-    st.plotly_chart(C.occupancy_chart(V.occupancy_grid(chart_months)), theme=None, width="stretch")
-    st.caption("Number of people per site each billing month (– means vacant). Edit this in billing/sites.toml.")
-
-# ============================================================== FARM POWER
-with tab_farm:
     device_choices = {
         "Pole barn (main)": POLE_BARN_MAIN,
         "RV sites": RV_SITES,
@@ -477,11 +424,15 @@ with tab_farm:
     with row2b:
         device_section(POLE_BARN_SUB)
 
+
 # ================================================================ WEATHER
 with tab_weather:
     if not V.weather_available():
         st.info("No weather data yet. Run the 'Ambient Weather backfill' workflow on GitHub.")
     else:
+        wx_first, wx_latest = c_wx_bounds()
+
+        # ---- latest reading
         now_wx = c_wx_latest()
         if now_wx:
             st.markdown("#### Latest reading")
@@ -494,7 +445,8 @@ with tab_weather:
             t_ = now_wx["when"]
             st.caption(f"Hour starting {t_:%b} {t_.day}, {t_.hour % 12 or 12} {t_:%p} PT. Updated once a day with the rest of the data.")
 
-        st.markdown("#### This cycle vs the same cycle last year")
+        # ---- this billing cycle against the same cycle a year earlier
+        st.markdown("#### This billing cycle vs the same cycle last year")
         wsum = c_wx_summary(ym)
         cur_w, ly_w = wsum["now"], wsum["last_year"]
         if not cur_w:
@@ -515,13 +467,245 @@ with tab_weather:
             if in_progress:
                 st.caption(f"This cycle is still in progress ({cur_w['days']} days so far), so it isn't a fair comparison with a full cycle last year.")
 
-        wdaily = c_wx_daily(period_start, period_end)
-        wdaily = wdaily[wdaily["Hours"] >= 12] if not wdaily.empty else wdaily
-        if not wdaily.empty:
-            st.markdown("#### Temperature and rain, day by day")
-            st.plotly_chart(C.temp_range_chart(wdaily), theme=None, width="stretch")
-            st.plotly_chart(C.rain_chart(wdaily), theme=None, width="stretch")
+        RANGES = ["Last 24 hours", "Last 7 days", "Last 30 days", "Last 90 days", "Last 12 months", "All time", "Custom"]
+        HOUR_LIMIT_DAYS = 62  # hourly charts get heavy past about two months
 
+        def pick_range(label: str, key: str):
+            """(start date, end date, cutoff timestamp or None) for a range choice, relative to the newest data."""
+            end = wx_latest.date()
+            if label == "Custom":
+                chosen = st.date_input(
+                    "Dates", value=(max(wx_first.date(), end - dt.timedelta(days=29)), end),
+                    min_value=wx_first.date(), max_value=end, key=f"{key}_dates",
+                )
+                if isinstance(chosen, (tuple, list)) and len(chosen) == 2:
+                    return chosen[0], chosen[1], None
+                return end - dt.timedelta(days=29), end, None
+            if label == "Last 24 hours":
+                return (wx_latest - pd.Timedelta(hours=24)).date(), end, wx_latest - pd.Timedelta(hours=24)
+            days = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90, "Last 12 months": 365}.get(label)
+            if days is None:
+                return wx_first.date(), end, None
+            return end - dt.timedelta(days=days - 1), end, None
+
+        def limit_hours(start, end, resolution):
+            if resolution == "Hour" and (end - start).days > HOUR_LIMIT_DAYS:
+                st.info(f"Hourly charts show up to {HOUR_LIMIT_DAYS} days, so this shows the most recent {HOUR_LIMIT_DAYS}. Pick Day for longer spans.")
+                return end - dt.timedelta(days=HOUR_LIMIT_DAYS), end
+            return start, end
+
+        # ---- explorer
+        st.markdown("#### Explore the weather")
+        e1, e2, e3 = st.columns([3, 3, 3])
+        metric = e1.selectbox("Metric", list(C.WEATHER_METRICS.keys()), key="wx_metric")
+        res = e2.segmented_control("Resolution", options=V.RESOLUTIONS, default="Day", key="wx_res") or "Day"
+        rng = e3.selectbox("Range", RANGES, index=3, key="wx_range")
+        col_name, unit, kind, band, needs_day = C.WEATHER_METRICS[metric]
+
+        opt1, opt2 = st.columns([3, 6])
+        base_f = V.DEGREE_DAY_BASE_F
+        if metric in ("Heating degree days", "Cooling degree days"):
+            base_f = opt1.number_input("Base temperature (°F)", value=float(V.DEGREE_DAY_BASE_F), min_value=40.0, max_value=80.0, step=1.0, key="wx_base")
+        compare = opt2.checkbox("Compare with the same period a year earlier", value=False, key="wx_compare")
+
+        r_start, r_end, cutoff = pick_range(rng, "wx")
+        if needs_day and res == "Hour":
+            st.info(f"{metric} is a per-day measure. Choose Day, Month or Year as the resolution.")
+        else:
+            r_start, r_end = limit_hours(r_start, r_end, res)
+            series = c_wx_series(r_start, r_end, res, float(base_f))
+            if cutoff is not None and not series.empty and res == "Hour":
+                series = series[series["Period"] > cutoff]
+            if series.empty:
+                st.info("No weather recorded in that range.")
+            else:
+                prior = None
+                if compare:
+                    prior = c_wx_series(r_start - pd.DateOffset(years=1), r_end - pd.DateOffset(years=1), res, float(base_f))
+                    prior = prior if prior is None or prior.empty else prior.assign(Period=prior["Period"])
+                st.plotly_chart(C.weather_metric_chart(series, metric, res, prior), theme=None, width="stretch")
+
+                vals = series[col_name].dropna()
+                if vals.empty:
+                    st.info("This metric has no values in that range.")
+                else:
+                    def when(i):
+                        ts = series.loc[i, "Period"]  # no %-d here: that format fails on Windows
+                        return {"Hour": f"{ts:%b} {ts.day}, {ts.hour % 12 or 12} {ts:%p}", "Day": f"{ts:%b} {ts.day}, {ts.year}",
+                                "Month": f"{ts:%B %Y}", "Year": f"{ts:%Y}"}[res]
+                    s1, s2, s3 = st.columns(3)
+                    fmt = (lambda v: f"{v:,.2f} {unit}".strip()) if kind == "bar" else (lambda v: f"{v:,.1f} {unit}".strip())
+                    if metric in C.SUM_LIKE:
+                        s1.metric("Total", fmt(vals.sum()))
+                        s2.metric(f"Average per {res.lower()}", fmt(vals.mean()))
+                        s3.metric(f"Highest {res.lower()}", fmt(vals.max()), help=when(vals.idxmax()))
+                    else:
+                        high_col = band[1] if band else col_name
+                        low_col = band[0] if band else col_name
+                        s1.metric("Average", fmt(vals.mean()))
+                        s2.metric("Highest", fmt(series[high_col].max()), help=when(series[high_col].idxmax()))
+                        s3.metric("Lowest", fmt(series[low_col].min()), help=when(series[low_col].idxmin()))
+
+                    notes = {
+                        "Hours of sunshine": f"An estimate from the sensor: an hour counts as sunny when sunlight averaged at least {V.SUNSHINE_WM2:.0f} W/m².",
+                        "Heating degree days": f"For each full day, how far its average temperature fell below {base_f:.0f}°F, added up. More means more heating demand.",
+                        "Cooling degree days": f"For each full day, how far its average temperature rose above {base_f:.0f}°F, added up. More means more cooling demand.",
+                        "Rainy days": f"Days with at least {V.RAINY_DAY_IN:.2f} in of rain.",
+                    }
+                    if metric in notes:
+                        st.caption(notes[metric])
+                    last_bucket = series["Period"].iloc[-1]
+                    step = {"Hour": pd.Timedelta(hours=1), "Day": pd.Timedelta(days=1), "Month": pd.DateOffset(months=1), "Year": pd.DateOffset(years=1)}[res]
+                    if res != "Hour" and last_bucket + step > wx_latest + pd.Timedelta(hours=1):
+                        st.caption(f"The latest {res.lower()} is still in progress, so its total or average isn't final.")
+                    st.download_button(
+                        "Download this table (CSV)", series.to_csv(index=False).encode("utf-8"),
+                        file_name=f"weather-{res.lower()}-{r_start}-{r_end}.csv", mime="text/csv",
+                    )
+
+        # ---- the same metric, year against year
+        st.markdown("#### Year over year")
+        yoy = c_wx_month_of_year(float(base_f))
+        if yoy.empty or yoy[col_name].dropna().empty:
+            st.info("Not enough history yet to compare years.")
+        else:
+            st.plotly_chart(C.year_overlay_chart(yoy, col_name, unit, metric), theme=None, width="stretch")
+            st.caption(f"{metric}, month by month, one line per year (complete months only). Uses the metric chosen in the explorer above.")
+
+        # ---- wind
+        st.markdown("#### Wind speed, colored by direction")
+        st.caption(
+            "Wind speed over time. Each arrow points the way the wind is blowing and is colored by where it came from; "
+            "at Day, Month and Year resolution that is the prevailing direction (speed-weighted), so a few strong hours "
+            "count more than many calm ones."
+        )
+        wa, wb, _wc = st.columns([3, 3, 3])
+        wres = wa.segmented_control("Resolution", options=V.RESOLUTIONS, default="Day", key="wind_res") or "Day"
+        wrng = wb.selectbox("Range", RANGES, index=2, key="wind_range")
+        ws, we, wcut = pick_range(wrng, "wind")
+        ws, we = limit_hours(ws, we, wres)
+        wind_df = c_wx_series(ws, we, wres, float(V.DEGREE_DAY_BASE_F))
+        if wcut is not None and not wind_df.empty and wres == "Hour":
+            wind_df = wind_df[wind_df["Period"] > wcut]
+        if wind_df.empty:
+            st.info("No weather recorded in that range.")
+        else:
+            st.plotly_chart(C.wind_direction_chart(wind_df, wres), theme=None, width="stretch")
+            known = wind_df.dropna(subset=["Compass"])
+            if not known.empty:
+                weight = known.groupby("Compass")["Wind mph"].sum()
+                top = weight.idxmax()
+                q1, q2, q3 = st.columns(3)
+                q1.metric("Average wind", f"{wind_df['Wind mph'].mean():.1f} mph")
+                q2.metric("Strongest gust", f"{wind_df['Gust mph'].max():.0f} mph")
+                q3.metric("Wind came most from", top, help=f"{weight[top] / weight.sum():.0%} of the wind (speed-weighted) in this range")
+
+        # ---- wind by season
+        st.markdown("#### Wind by season")
+        wseason = c_wind_seasons()
+        if wseason:
+            st.plotly_chart(C.wind_rose_chart(wseason["rose"]), theme=None, width="stretch")
+            st.caption(
+                "A wind rose: each bar points to a direction the wind comes FROM, and its length is how often (percent of hours). "
+                "The colors split each bar by wind speed. Longer bars mean that direction is more common."
+            )
+            stat_rows = []
+            for season, st_ in wseason["stats"].items():
+                stat_rows.append({
+                    "Season": season, "Prevailing from": st_["prevailing"], "Average mph": round(st_["mean_mph"], 1),
+                    "Hours under 1 mph": f"{st_['light_share']:.0%}",
+                    "Strongest gust": f"{st_['gust_mph']:.0f} mph, {st_['gust_when']:%b} {st_['gust_when'].day}, {st_['gust_when'].year}",
+                })
+            st.dataframe(pd.DataFrame(stat_rows), hide_index=True, width="stretch")
+            for paragraph in V.wind_insights(wseason["stats"]):
+                st.markdown(paragraph)
+            st.caption(
+                f"What the station recorded is measured data from {wx_first:%b} {wx_first.day}, {wx_first.year} on. The 'Regionally' notes are "
+                "general knowledge about this part of the Pacific Northwest, not measurements. Terrain around a station can steer the wind "
+                "away from the regional pattern, and a short record only shows a few years of it."
+            )
+
+        # ---- large-scale climate patterns
+        st.markdown("#### Large-scale climate patterns (ENSO and the PDO)")
+        clim = c_climate()
+        if clim.empty:
+            st.info("The climate feed hasn't run yet. Run the 'Climate indices pull' workflow on GitHub.")
+        else:
+            now_c = V.climate_now(clim)
+            season_names = {"DJF": "Dec–Feb", "JFM": "Jan–Mar", "FMA": "Feb–Apr", "MAM": "Mar–May", "AMJ": "Apr–Jun", "MJJ": "May–Jul",
+                            "JJA": "Jun–Aug", "JAS": "Jul–Sep", "ASO": "Aug–Oct", "SON": "Sep–Nov", "OND": "Oct–Dec", "NDJ": "Nov–Jan"}
+            if now_c:
+                k1, k2, k3 = st.columns(3)
+                chg = None if now_c["oni_3mo_ago"] is None else f"{now_c['oni'] - now_c['oni_3mo_ago']:+.2f} over 3 months"
+                k1.metric(
+                    f"ENSO (ONI), {season_names.get(now_c['season'], now_c['season'])} {now_c['month']:%Y}", f"{now_c['oni']:+.2f} °C",
+                    delta=chg, delta_color="off",
+                    help="The Oceanic Niño Index: how much warmer (+) or cooler (-) the central tropical Pacific is than normal, averaged over 3 months.",
+                )
+                phase_text = "Neutral" if now_c["phase"] == "Neutral" else f"{now_c['strength'].capitalize()} {now_c['phase']}"
+                k2.metric("ENSO phase", phase_text)
+                if now_c["pdo"] is not None:
+                    pdo_phase = "negative (cool) phase" if now_c["pdo"] < 0 else "positive (warm) phase"
+                    k3.metric(f"PDO, {now_c['pdo_month']:%b %Y}", f"{now_c['pdo']:+.2f}", help=f"The Pacific Decadal Oscillation is in its {pdo_phase}.")
+                if now_c["phase"] == "El Niño" and now_c["pdo"] is not None and now_c["pdo"] < -0.5:
+                    st.info(
+                        "ENSO is in an El Niño while the PDO is strongly negative. For the Pacific Northwest these usually pull in opposite "
+                        "directions, so the typical El Niño tilt may be muted this winter and forecasts are less certain than usual."
+                    )
+
+            span_choice = st.selectbox("Time span for the charts", ["Last 10 years", "Since 2000", "All (1950 on)"], key="clim_span")
+            cut = {"Last 10 years": pd.Timestamp(wx_latest.year - 10, 1, 1), "Since 2000": pd.Timestamp(2000, 1, 1)}.get(span_choice, pd.Timestamp(1950, 1, 1))
+            shown = clim[clim["Period"] >= cut]
+            st.markdown("**ENSO.** Red bars are El Niño (warm), blue are La Niña (cool), gray is neutral. The dotted lines mark ±0.5 °C, where NOAA starts counting an event.")
+            st.plotly_chart(C.climate_index_chart(shown, "oni", "ONI (°C)", threshold=0.5), theme=None, width="stretch")
+            st.markdown("**PDO.** The same colors: red is the warm phase, blue the cool phase. It changes slowly, over years to decades.")
+            st.plotly_chart(C.climate_index_chart(shown, "pdo", "PDO index"), theme=None, width="stretch")
+
+            local_months = c_wx_month_of_year(float(V.DEGREE_DAY_BASE_F))
+            if not local_months.empty:
+                st.markdown("**Your station against ENSO.** The top panel is ENSO, the others are your own monthly temperature and rain, on the same time axis.")
+                st.plotly_chart(C.climate_vs_local_chart(clim, local_months), theme=None, width="stretch")
+            winters = c_winters()
+            if not winters.empty:
+                st.markdown("**Winters on record at your station** (December to February)")
+                st.dataframe(winters.drop(columns=["Complete"]).assign(Note=winters["Complete"].map({True: "", False: "partial"})), hide_index=True, width="stretch")
+                strong = winters[winters["ENSO (ONI)"] >= 1.5]
+                calm = winters[winters["ENSO (ONI)"].abs() < 0.5]
+                if not strong.empty and not calm.empty:
+                    st.caption(
+                        f"The record includes {len(strong)} winter with a strong El Niño ({strong.iloc[0]['Winter']}, {int(strong.iloc[0]['Months of data'])} months of data) "
+                        f"and {len(calm)} winters near neutral. The strong El Niño winter averaged {strong['Avg temp °F'].mean():.1f}°F against {calm['Avg temp °F'].mean():.1f}°F "
+                        "in the neutral ones. With so few winters, and the El Niño one only partly recorded, treat that as a hint and not a rule."
+                    )
+            with st.expander("What are ENSO and the PDO, and why do they matter here?"):
+                st.markdown(
+                    """
+**ENSO (El Niño–Southern Oscillation)** is a natural swing in the tropical Pacific. Every two to seven years the ocean along the equator
+warms (**El Niño**) or cools (**La Niña**) by a degree or more, and the atmosphere above it shifts with it. Each event lasts roughly a year
+and tends to peak in late fall and winter. NOAA tracks it with the **Oceanic Niño Index (ONI)**, the 3-month average temperature
+anomaly in a key patch of the equatorial Pacific: at or above **+0.5 °C** is El Niño, at or below **-0.5 °C** is La Niña. By strength:
+weak 0.5–0.9, moderate 1.0–1.4, strong 1.5–1.9, very strong 2.0 and up.
+
+**What it tends to do in the Pacific Northwest** (a tilt in the odds, strongest from December to March, not a promise):
+- **El Niño winters** lean warmer, often with less mountain snow, and somewhat drier than normal. The signal here is weaker and less
+  reliable than in the southern U.S., and individual winters have broken the pattern.
+- **La Niña winters** lean cooler and wetter, with more snow in the mountains.
+- Neutral years follow no clear tilt, so other patterns decide the weather.
+
+**The PDO (Pacific Decadal Oscillation)** is a slower pattern in North Pacific ocean temperatures, with phases that can last years to decades.
+In its **negative (cool) phase** the ocean off the Northwest coast runs cooler, which tends to favor cooler, wetter conditions and to
+strengthen La Niña effects. In its **positive (warm) phase** the tilt reverses and El Niño effects are stronger. When ENSO and the PDO
+disagree, as when a strong El Niño meets a negative PDO, their effects can partly cancel and seasonal forecasts are less confident.
+
+**Not tracked here:** shorter swings such as atmospheric rivers (long plumes of moisture that bring heavy rain) and the Madden–Julian
+Oscillation (a pulse of tropical storminess that moves around the globe every month or two) can override these seasonal tilts for days
+or weeks.
+
+*Data: NOAA Climate Prediction Center (ONI) and NOAA NCEI (PDO), both monthly. This dashboard refreshes them weekly.*
+"""
+                )
+
+        # ---- power vs weather
         st.markdown("#### Does the weather drive your power use?")
         st.caption(
             "Each dot is one day over the past year: the day's average outdoor temperature across, kWh used up. "
@@ -537,16 +721,104 @@ with tab_weather:
             fig_sc, r_val, per10 = C.energy_temp_scatter(scatter_df, wx_pick)
             st.plotly_chart(fig_sc, theme=None, width="stretch")
             strength = "strong" if abs(r_val) >= 0.7 else "moderate" if abs(r_val) >= 0.4 else "weak"
-            direction = "cooler" if r_val < 0 else "warmer"
-            st.caption(
-                f"{wx_pick}: a {strength} link (correlation {r_val:+.2f}, from {len(scatter_df)} days). "
-                f"On average, each 10°F {'drop' if per10 < 0 else 'rise'} in temperature goes with about {abs(per10):,.0f} kWh "
-                f"{'more' if per10 < 0 else 'more'} per day; {direction} days use more." if abs(r_val) >= 0.4 else
-                f"{wx_pick}: only a {strength} link with temperature (correlation {r_val:+.2f}, from {len(scatter_df)} days), "
-                "so weather isn't what mainly drives it."
-            )
+            if abs(r_val) >= 0.4:
+                st.caption(
+                    f"{wx_pick}: a {strength} link (correlation {r_val:+.2f}, from {len(scatter_df)} days). "
+                    f"On average, each 10°F {'drop' if per10 < 0 else 'rise'} in temperature goes with about {abs(per10):,.0f} kWh more per day; "
+                    f"{'cooler' if r_val < 0 else 'warmer'} days use more."
+                )
+            else:
+                st.caption(
+                    f"{wx_pick}: only a {strength} link with temperature (correlation {r_val:+.2f}, from {len(scatter_df)} days), "
+                    "so weather isn't what mainly drives it."
+                )
 
-# ============================================================ UTILITY BILLS
+# ======================================================= BILLING: TENANTS
+with tab_tenants:
+    st.markdown("#### What each tenant owes")
+    if whatif:
+        wi_a, wi_b = st.columns([9, 3])
+        wi_a.info(
+            "What-if view: the charges below use the headcounts you picked, not the real occupancy. "
+            "Your texts and past bills are unchanged."
+        )
+
+        def _reset():
+            for _s in cfg.sites:
+                st.session_state.pop(ppl_key(_s.name), None)
+
+        wi_b.button("Reset to real occupancy", on_click=_reset)
+
+    cards = c_site_cards(ym, override_t)
+    prev_by_site = prev.set_index("Tenant")["Charge ($)"] if not prev.empty else pd.Series(dtype=float)
+    card_cols = st.columns(len(cards))
+    for col, (_, row) in zip(card_cols, cards.iterrows()):
+        with col:
+            # Fixed-height top section so the People dropdowns line up across cards
+            with st.container(height=150, border=False):
+                if row["People"] == 0:
+                    # Same layout as an occupied card: dollars on top, kWh underneath. For a vacant site
+                    # that is its own meter's actual usage at the tenant rate (no fee, nobody is billed).
+                    own = float(row["Own meter kWh"])
+                    st.metric(row["Site"], f"${own * cfg.rate_per_kwh:,.2f}")
+                    if not row["metered"]:
+                        st.caption(f"{own:,.1f} kWh · vacant, no meter yet")
+                    elif own > cfg.vacant_alert_kwh:
+                        st.caption(f"⚠️ {own:,.1f} kWh · vacant, no bill; counted in the owners' share")
+                    elif own < 0.05:
+                        st.caption(f"{own:,.1f} kWh · vacant, nothing used")
+                    else:
+                        st.caption(f"{own:,.1f} kWh · vacant, no bill; counted in the owners' share")
+                else:
+                    delta = None
+                    if row["Site"] in prev_by_site.index and not whatif:
+                        delta = f"{signed_money(row['Charge ($)'] - float(prev_by_site[row['Site']]))} vs last cycle"
+                    st.metric(row["Site"], f"${row['Charge ($)']:,.2f}", delta=delta, delta_color="off")
+                    st.caption(f"{row['kWh (calc)']:,.0f} kWh")
+            real = int(row["Configured"])
+            options = [people_label(n) for n in sorted({0, 1, 2, real})]
+            shown = people_label(int(row["People"]))
+            st.selectbox("People", options, index=options.index(shown) if shown in options else options.index(people_label(real)), key=ppl_key(row["Site"]))
+
+
+    st.markdown("#### What makes up each bill" + (" (what-if headcounts)" if whatif else ""))
+    if cur.empty:
+        st.info("No occupied sites this cycle.")
+    else:
+        st.plotly_chart(
+            C.bill_breakdown_chart(V.bill_breakdown_dollars(cur, cfg.rate_per_kwh)), theme=None, width="stretch"
+        )
+        st.caption(
+            f"Each bill = your own metered kWh + a share of the kitchen/lounge, shop and base load, at \\${cfg.rate_per_kwh:.4f}/kWh, "
+            f"plus a \\${cfg.monthly_fee:.2f} monthly fee. Shares are split by people, and vacant sites aren't counted."
+        )
+        table = cur[["Tenant", "Own kWh", "Kitchen kWh", "Shop kWh", "Base kWh", "kWh (calc)", "Fee ($)", "Charge ($)"]].copy()
+        kwh_cols = ["Own kWh", "Kitchen kWh", "Shop kWh", "Base kWh", "kWh (calc)"]
+        st.dataframe(
+            table, hide_index=True, width="stretch",
+            column_config={c: st.column_config.NumberColumn(format="%.1f") for c in kwh_cols}
+            | {"Fee ($)": st.column_config.NumberColumn(format="$%.2f"), "Charge ($)": st.column_config.NumberColumn(format="$%.2f")},
+        )
+        st.download_button(
+            "Download this cycle (CSV)", table.to_csv(index=False).encode("utf-8"),
+            file_name=f"tenant-charges-{ym}{'-whatif' if whatif else ''}.csv", mime="text/csv",
+        )
+
+    st.markdown("#### One tenant over time")
+    sites_in_range = [s.name for s in cfg.sites if (all_tenants["Tenant"] == s.name).any()] if not all_tenants.empty else []
+    if sites_in_range:
+        pick_a, pick_b = st.columns([3, 9])
+        tenant_choice = pick_a.selectbox("Site", sites_in_range)
+        view = pick_b.segmented_control("View", options=["$", "kWh"], default="$")
+        site_obj = next(s for s in cfg.sites if s.name == tenant_choice)
+        vacant = [m for m in chart_months if cfg.people(site_obj, m) == 0]
+        st.plotly_chart(C.tenant_trend_chart(all_tenants, tenant_choice, view or "$", vacant), theme=None, width="stretch")
+
+    st.markdown("#### Who lived where")
+    st.plotly_chart(C.occupancy_chart(V.occupancy_grid(chart_months)), theme=None, width="stretch")
+    st.caption("Number of people per site each billing month (– means vacant). Edit this in billing/sites.toml.")
+
+# ==================================================== BILLING: UTILITY BILLS
 with tab_utility:
     bills = c_bills()
     if bills.empty:

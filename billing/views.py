@@ -445,3 +445,268 @@ def energy_vs_temp(conn: sqlite3.Connection, wconn: sqlite3.Connection, gid: int
         return pd.DataFrame()
     m = e.merge(w[["day", "Avg °F", "Hours", "Rain in"]], on="day")
     return m[(m["Hours"] >= 20) & (m["kWh"] > 0)].reset_index(drop=True)
+
+
+# ------------------------------------------------------- weather explorer
+RESOLUTIONS = ["Hour", "Day", "Month", "Year"]
+SUNSHINE_WM2 = 120.0   # an hour counts as sunny when its average solar radiation reaches this
+RAINY_DAY_IN = 0.01    # a day counts as rainy at 0.01 in or more (the usual "wet day" cutoff)
+DEGREE_DAY_BASE_F = 65.0
+COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+
+def compass_point(deg: float) -> str | None:
+    """Compass sector (N, NE, ...) for a direction in degrees; each sector is 45 degrees wide."""
+    if deg is None or pd.isna(deg):
+        return None
+    return COMPASS[int(((deg % 360) + 22.5) // 45) % 8]
+
+
+def _period_start(day: pd.Series, resolution: str) -> pd.Series:
+    if resolution == "Month":
+        return day.dt.to_period("M").dt.to_timestamp()
+    if resolution == "Year":
+        return day.dt.to_period("Y").dt.to_timestamp()
+    return day
+
+
+def weather_series(
+    wconn: sqlite3.Connection, start: dt.date, end: dt.date, resolution: str = "Day",
+    base_f: float = DEGREE_DAY_BASE_F, tz: str = PACIFIC_TZ,
+) -> pd.DataFrame:
+    """Weather at hour / day / month / year resolution, bucketed in local (Pacific) time.
+
+    One row per bucket. Columns combine the hourly values correctly: temperature average and the
+    highest high / lowest low, rain summed, gust and UV as peaks, wind direction as the speed-weighted
+    prevailing direction. Degree days, sunny hours and rainy days are counted from complete local days
+    (20+ hours of data). `Hours` shows how much data each bucket holds, so a partial bucket is visible.
+    """
+    if resolution not in RESOLUTIONS:
+        raise ValueError(f"resolution must be one of {RESOLUTIONS}")
+    lo = (pd.Timestamp(start) - pd.Timedelta(days=1)).strftime("%Y-%m-%d 00:00")
+    hi = (pd.Timestamp(end) + pd.Timedelta(days=2)).strftime("%Y-%m-%d 00:00")
+    h = pd.read_sql_query("select * from weather_hourly where hour_utc >= ? and hour_utc < ?", wconn, params=(lo, hi))
+    if h.empty:
+        return pd.DataFrame()
+    h["local"] = pd.to_datetime(h["hour_utc"], utc=True).dt.tz_convert(tz).dt.tz_localize(None)
+    h = h[(h["local"] >= pd.Timestamp(start)) & (h["local"] < pd.Timestamp(end) + pd.Timedelta(days=1))].copy()
+    if h.empty:
+        return pd.DataFrame()
+    h["day"] = h["local"].dt.normalize()
+    h["Period"] = h["local"] if resolution == "Hour" else _period_start(h["day"], resolution)
+
+    # wind as vectors, weighted by speed: the prevailing direction, not a plain average of angles
+    import math
+
+    rad = h["wind_dir_deg"] * math.pi / 180.0
+    h["_u"] = h["wind_mph_avg"] * rad.map(math.sin)
+    h["_v"] = h["wind_mph_avg"] * rad.map(math.cos)
+    h["_sunny"] = (h["solar_wm2_avg"] >= SUNSHINE_WM2).astype(float).where(h["solar_wm2_avg"].notna())
+
+    g = h.groupby("Period")
+    out = pd.DataFrame(
+        {
+            "Hours": g["hour_utc"].count(),
+            "Temp avg °F": g["temp_f_avg"].mean(), "Temp high °F": g["temp_f_max"].max(), "Temp low °F": g["temp_f_min"].min(),
+            "Feels like °F": g["feels_like_f"].mean(), "Dew point °F": g["dew_point_f"].mean(),
+            "Humidity %": g["humidity_avg"].mean(),
+            "Wind mph": g["wind_mph_avg"].mean(), "Gust mph": g["gust_mph_max"].max(),
+            "Rain in": g["rain_in"].sum(),
+            "Solar avg W/m²": g["solar_wm2_avg"].mean(), "Solar peak W/m²": g["solar_wm2_max"].max(),
+            "UV peak": g["uv_max"].max(),
+            "Sunny hours": g["_sunny"].sum(min_count=1),
+        }
+    )
+    u, v = g["_u"].sum(min_count=1), g["_v"].sum(min_count=1)
+    out["Wind dir °"] = [
+        (math.degrees(math.atan2(a, b)) % 360) if pd.notna(a) and pd.notna(b) and (abs(a) + abs(b)) > 1e-9 else float("nan")
+        for a, b in zip(u, v)
+    ]
+
+    # degree days and rainy days come from complete local days, then add up into the bucket
+    days = h.groupby("day").agg(n=("hour_utc", "count"), avg=("temp_f_avg", "mean"), rain=("rain_in", "sum"))
+    full = days["n"] >= 20
+    days["HDD"] = (base_f - days["avg"]).clip(lower=0).where(full)
+    days["CDD"] = (days["avg"] - base_f).clip(lower=0).where(full)
+    # A day with rain is rainy however many hours were recorded; only a DRY day needs a full day of data
+    # to be trusted (a partial day with no rain yet could still have been wet). The tiny allowance keeps
+    # 0.0099999 from hiding a 0.01 in day.
+    wet = days["rain"] >= RAINY_DAY_IN - 1e-6
+    days["Rainy"] = wet.astype(float).where(wet | full)
+    days["Period"] = days.index if resolution == "Hour" else _period_start(pd.Series(days.index, index=days.index), resolution).values
+    if resolution == "Hour":
+        # degree days and rainy days are per-day ideas, so they are blank at hourly resolution
+        out["Heating degree days"] = out["Cooling degree days"] = out["Rainy days"] = float("nan")
+        out["Wind dir °"] = g["wind_dir_deg"].first()  # an hour has its own direction, even when calm
+    else:
+        dg = days.groupby("Period")
+        out["Heating degree days"] = dg["HDD"].sum(min_count=1)
+        out["Cooling degree days"] = dg["CDD"].sum(min_count=1)
+        out["Rainy days"] = dg["Rainy"].sum(min_count=1)
+    out["Compass"] = out["Wind dir °"].map(compass_point)
+    return out.round(2).reset_index()
+
+
+def latest_weather_time(wconn: sqlite3.Connection) -> pd.Timestamp | None:
+    r = wconn.execute("select max(hour_utc) from weather_hourly").fetchone()[0]
+    return None if r is None else pd.Timestamp(r, tz="UTC").tz_convert(PACIFIC_TZ).tz_localize(None)
+
+
+def first_weather_time(wconn: sqlite3.Connection) -> pd.Timestamp | None:
+    r = wconn.execute("select min(hour_utc) from weather_hourly").fetchone()[0]
+    return None if r is None else pd.Timestamp(r, tz="UTC").tz_convert(PACIFIC_TZ).tz_localize(None)
+
+
+def weather_month_of_year(wconn: sqlite3.Connection, base_f: float = DEGREE_DAY_BASE_F) -> pd.DataFrame:
+    """Every complete month on record with its Year and month number, for year-over-year overlays."""
+    first, last = first_weather_time(wconn), latest_weather_time(wconn)
+    if first is None:
+        return pd.DataFrame()
+    m = weather_series(wconn, first.date(), last.date(), "Month", base_f)
+    if m.empty:
+        return m
+    m["Year"], m["MonthNum"] = m["Period"].dt.year, m["Period"].dt.month
+    expected = m["Period"].dt.days_in_month * 24
+    return m[m["Hours"] >= 0.85 * expected].reset_index(drop=True)  # drop partial months (the first and the current)
+
+
+# ------------------------------------------------------- climate patterns
+def climate_monthly(wconn: sqlite3.Connection) -> pd.DataFrame:
+    """ENSO (ONI) and PDO by month, or an empty frame if the climate feed has not run yet."""
+    names = {r[0] for r in wconn.execute("select name from sqlite_master where type = 'table'")}
+    if "climate_monthly" not in names:
+        return pd.DataFrame()
+    df = pd.read_sql_query("select month, oni, oni_season, pdo from climate_monthly order by month", wconn)
+    df["Period"] = pd.to_datetime(df["month"] + "-01")
+    return df
+
+
+def climate_now(df: pd.DataFrame) -> dict | None:
+    """Where ENSO and the PDO stand now, and how fast ENSO has moved."""
+    from shared.climate import phase, strength
+
+    df = df.sort_values("Period")
+    oni = df.dropna(subset=["oni"])
+    if oni.empty:
+        return None
+    last = oni.iloc[-1]
+    earlier = oni[oni["Period"] <= last["Period"] - pd.DateOffset(months=3)]
+    pdo = df.dropna(subset=["pdo"])
+    return {
+        "oni": float(last["oni"]), "season": last["oni_season"], "month": last["Period"],
+        "phase": phase(float(last["oni"])), "strength": strength(float(last["oni"])),
+        "oni_3mo_ago": float(earlier.iloc[-1]["oni"]) if not earlier.empty else None,
+        "pdo": float(pdo.iloc[-1]["pdo"]) if not pdo.empty else None,
+        "pdo_month": pdo.iloc[-1]["Period"] if not pdo.empty else None,
+    }
+
+
+def winter_summary(wconn: sqlite3.Connection, clim: pd.DataFrame) -> pd.DataFrame:
+    """Each winter (December to February) on record: local temperature and rain next to ENSO and the PDO."""
+    first, last = first_weather_time(wconn), latest_weather_time(wconn)
+    if first is None:
+        return pd.DataFrame()
+    m = weather_series(wconn, first.date(), last.date(), "Month")
+    if m.empty:
+        return m
+    m["wy"] = m["Period"].map(lambda p: p.year if p.month == 12 else p.year - 1 if p.month <= 2 else None)
+    w = m[m["wy"].notna() & m["Period"].dt.month.isin([12, 1, 2])]
+    rows = []
+    for wy, g in w.groupby("wy"):
+        months = len(g)
+        full = (g["Hours"] >= 0.85 * g["Period"].dt.days_in_month * 24).all() and months == 3
+        centre = pd.Timestamp(int(wy) + 1, 1, 1)
+        c = clim[clim["Period"] == centre] if not clim.empty else pd.DataFrame()
+        pdo = clim[(clim["Period"] >= pd.Timestamp(int(wy), 12, 1)) & (clim["Period"] <= pd.Timestamp(int(wy) + 1, 2, 1))]["pdo"].mean() if not clim.empty else float("nan")
+        rows.append({
+            "Winter": f"{int(wy)}–{str(int(wy) + 1)[2:]}", "Months of data": months, "Complete": bool(full),
+            "Avg temp °F": round(float(g["Temp avg °F"].mean()), 1), "Rain in": round(float(g["Rain in"].sum()), 1),
+            "ENSO (ONI)": float(c.iloc[0]["oni"]) if not c.empty and pd.notna(c.iloc[0]["oni"]) else float("nan"),
+            "PDO": round(float(pdo), 2) if pd.notna(pdo) else float("nan"),
+        })
+    return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------ wind by season
+SEASONS = {"Winter": [12, 1, 2], "Spring": [3, 4, 5], "Summer": [6, 7, 8], "Fall": [9, 10, 11]}
+WIND_BINS = [(0.0, 1.0, "under 1 mph"), (1.0, 3.0, "1 to 3 mph"), (3.0, 6.0, "3 to 6 mph"), (6.0, 1e9, "6 mph and up")]
+
+
+def wind_by_season(wconn: sqlite3.Connection) -> dict:
+    """Wind rose data and plain statistics for each season, from every hour on record (Pacific time).
+
+    `rose[season]` is a table of % of hours by compass sector and speed band. Statistics use the
+    speed-weighted prevailing direction, so a few strong hours count more than many calm ones.
+    """
+    import math
+
+    h = pd.read_sql_query(
+        "select hour_utc, wind_mph_avg, gust_mph_max, wind_dir_deg from weather_hourly "
+        "where wind_mph_avg is not null", wconn)
+    if h.empty:
+        return {}
+    local = pd.to_datetime(h["hour_utc"], utc=True).dt.tz_convert(PACIFIC_TZ).dt.tz_localize(None)
+    h["month"] = local.dt.month
+    h["when"] = local
+    h["sector"] = h["wind_dir_deg"].map(compass_point)
+    out = {"rose": {}, "stats": {}}
+    for season, months in SEASONS.items():
+        s = h[h["month"].isin(months)]
+        if s.empty:
+            continue
+        has_dir = s.dropna(subset=["sector"])
+        table = pd.DataFrame(0.0, index=COMPASS, columns=[b[2] for b in WIND_BINS])
+        for lo, hi, label in WIND_BINS:
+            sel = has_dir[(has_dir["wind_mph_avg"] >= lo) & (has_dir["wind_mph_avg"] < hi)]
+            for sector, n in sel["sector"].value_counts().items():
+                table.loc[sector, label] = n / len(has_dir) * 100.0 if len(has_dir) else 0.0
+        rad = has_dir["wind_dir_deg"] * math.pi / 180.0
+        u, v = (has_dir["wind_mph_avg"] * rad.map(math.sin)).sum(), (has_dir["wind_mph_avg"] * rad.map(math.cos)).sum()
+        prevailing = compass_point(math.degrees(math.atan2(u, v)) % 360) if (abs(u) + abs(v)) > 1e-9 else None
+        weight = has_dir.groupby("sector")["wind_mph_avg"].sum()
+        by_hours = has_dir["sector"].value_counts(normalize=True)
+        gust_row = s.loc[s["gust_mph_max"].idxmax()]
+        out["rose"][season] = table
+        out["stats"][season] = {
+            "hours": len(s), "mean_mph": float(s["wind_mph_avg"].mean()), "prevailing": prevailing,
+            "prevailing_share": float(weight.max() / weight.sum()) if weight.sum() else None,
+            "most_frequent": by_hours.index[0] if len(by_hours) else None,
+            "most_frequent_share": float(by_hours.iloc[0]) if len(by_hours) else None,
+            "top_two": list(weight.sort_values(ascending=False).index[:2]),
+            "gust_mph": float(gust_row["gust_mph_max"]), "gust_when": gust_row["when"],
+            "gust_from": compass_point(gust_row["wind_dir_deg"]),
+            "light_share": float((s["wind_mph_avg"] < 1.0).mean()),
+        }
+    return out
+
+
+# What the region's winds usually do, in general terms (not from your station), to set beside the local record
+TYPICAL_WIND = {
+    "Winter": ({"S", "SW", "SE"}, "winter storms usually push strong south and southwest winds ahead of each front, with calmer, cold nights in between"),
+    "Spring": ({"W", "SW", "NW"}, "spring is a gusty transition, with westerly and southwesterly winds behind passing fronts"),
+    "Summer": ({"NW", "N", "W"}, "summer usually brings a steady northwest to west flow, strongest in the afternoon as marine air is drawn inland"),
+    "Fall": ({"S", "SW", "SE", "E"}, "fall switches back toward southerly storm winds, with the occasional dry east wind off the land"),
+}
+
+
+def wind_insights(stats: dict) -> list[str]:
+    """One plain-language paragraph per season: what the local record shows, next to the regional norm."""
+    out = []
+    for season, st in stats.items():
+        if not st.get("prevailing"):
+            continue
+        a, b = (st["top_two"] + [None, None])[:2]
+        dirs = f"{a} or {b}" if b else a
+        gust = f"{st['gust_mph']:.0f} mph"
+        gust_dir = f", from the {st['gust_from']}" if st.get("gust_from") else ""
+        text = (
+            f"**{season}.** Winds here come most from the {dirs}; the speed-weighted prevailing direction is {st['prevailing']}. "
+            f"The average is only {st['mean_mph']:.1f} mph, and {st['light_share']:.0%} of hours are lighter than 1 mph. "
+            f"The strongest gust on record was {gust}{gust_dir}, on {st['gust_when']:%b} {st['gust_when'].day}, {st['gust_when'].year}."
+        )
+        typical, note = TYPICAL_WIND.get(season, (set(), ""))
+        if typical:
+            fit = "fits" if st["prevailing"] in typical else "differs from"
+            text += f" Regionally, {note}. Your prevailing direction {fit} that pattern."
+        out.append(text)
+    return out

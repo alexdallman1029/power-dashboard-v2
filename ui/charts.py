@@ -387,3 +387,195 @@ def energy_temp_scatter(m: pd.DataFrame, label: str) -> tuple[go.Figure, float, 
     fig.update_xaxes(title_text="Average outdoor temperature that day (°F)")
     fig.update_yaxes(title_text=f"{label}, kWh per day", rangemode="tozero")
     return _base(fig, height=340), r, float(slope * 10)
+
+
+# ----------------------------------------------------- weather explorer
+# name -> (column, unit, kind, (low column, high column) or None, needs a full day to be meaningful)
+WEATHER_METRICS = {
+    "Temperature": ("Temp avg °F", "°F", "line", ("Temp low °F", "Temp high °F"), False),
+    "Feels like": ("Feels like °F", "°F", "line", None, False),
+    "Dew point": ("Dew point °F", "°F", "line", None, False),
+    "Humidity": ("Humidity %", "%", "line", None, False),
+    "Wind speed (average)": ("Wind mph", "mph", "line", None, False),
+    "Wind gust (peak)": ("Gust mph", "mph", "line", None, False),
+    "Rain": ("Rain in", "in", "bar", None, False),
+    "Solar radiation (average)": ("Solar avg W/m²", "W/m²", "line", None, False),
+    "Solar radiation (peak)": ("Solar peak W/m²", "W/m²", "line", None, False),
+    "UV index (peak)": ("UV peak", "", "line", None, False),
+    "Hours of sunshine": ("Sunny hours", "hours", "bar", None, False),
+    "Heating degree days": ("Heating degree days", "degree days", "bar", None, True),
+    "Cooling degree days": ("Cooling degree days", "degree days", "bar", None, True),
+    "Rainy days": ("Rainy days", "days", "bar", None, True),
+}
+SUM_LIKE = {"Rain", "Hours of sunshine", "Heating degree days", "Cooling degree days", "Rainy days"}
+TICKS = {"Hour": "%b %-d, %-I %p", "Day": "%b %-d", "Month": "%b %Y", "Year": "%Y"}
+SECTOR_COLORS = dict(zip(["N", "NE", "E", "SE", "S", "SW", "W", "NW"],
+                         ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]))
+
+
+def weather_metric_chart(d: pd.DataFrame, name: str, resolution: str, compare: pd.DataFrame | None = None) -> go.Figure:
+    """One weather metric over time. Lines for levels (with a low-to-high band where there is one),
+    bars for totals and counts. `compare` is the same range a year earlier, shown quietly behind."""
+    col, unit, kind, band, _ = WEATHER_METRICS[name]
+    fig = go.Figure()
+    show_markers = len(d) <= 60
+    hover_x = {"Hour": "%b %-d, %-I %p", "Day": "%b %-d, %Y", "Month": "%B %Y", "Year": "%Y"}[resolution]
+    if compare is not None and not compare.empty:
+        shifted = compare["Period"] + pd.DateOffset(years=1)
+        if kind == "bar":
+            fig.add_trace(go.Bar(x=shifted, y=compare[col], name="A year earlier", marker=dict(color=MUTED, opacity=0.45, line=dict(width=0)),
+                                 hovertemplate="A year earlier<br>%{y:,.2f} " + unit + "<extra></extra>"))
+        else:
+            fig.add_trace(go.Scatter(x=shifted, y=compare[col], mode="lines", name="A year earlier",
+                                     line=dict(color=MUTED, width=1.5, dash="dot"),
+                                     hovertemplate="A year earlier<br>%{y:,.1f} " + unit + "<extra></extra>"))
+    if band and kind == "line":
+        lo, hi = band
+        edge = "rgba(57,135,229,0.55)"
+        fig.add_trace(go.Scatter(x=d["Period"], y=d[lo], mode="lines", line=dict(width=1, color=edge), showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=d["Period"], y=d[hi], mode="lines", line=dict(width=1, color=edge), fill="tonexty",
+                                 fillcolor="rgba(57,135,229,0.25)", name="Low to high", customdata=d[[lo]],
+                                 hovertemplate="High %{y:.0f}°F · Low %{customdata[0]:.0f}°F<extra></extra>"))
+    if kind == "bar":
+        fig.add_trace(go.Bar(x=d["Period"], y=d[col], name=name, marker=dict(color=ACCENT, line=dict(width=0)),
+                             hovertemplate=f"{name}<br>%{{y:,.2f}} {unit}<extra></extra>"))
+        fig.update_layout(bargap=0.3, barmode="group")
+    else:
+        fig.add_trace(go.Scatter(x=d["Period"], y=d[col], mode="lines+markers" if show_markers else "lines", name=name,
+                                 line=dict(color=ACCENT, width=2), marker=dict(size=7, line=dict(color=SURFACE, width=1)),
+                                 hovertemplate=f"{name}<br>%{{y:,.1f}} {unit}<extra></extra>"))
+    fig.update_xaxes(tickformat=TICKS[resolution], hoverformat=hover_x)
+    fig.update_yaxes(title_text=unit or name, rangemode="tozero" if kind == "bar" or "UV" in name else "normal")
+    fig.update_layout(hovermode="x unified")
+    many = (compare is not None and not compare.empty) or (band and kind == "line")
+    return _base(fig, height=340, legend=bool(many))
+
+
+def wind_direction_chart(d: pd.DataFrame, resolution: str) -> go.Figure:
+    """Wind speed against time. A thin line joins the points; each point is colored by the compass
+    direction the wind came from (at day, month and year resolution, the prevailing direction)."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=d["Period"], y=d["Wind mph"], mode="lines", line=dict(color="rgba(195,194,183,0.35)", width=1),
+                             showlegend=False, hoverinfo="skip"))
+    size = 8 if len(d) <= 400 else 5
+    hover_x = {"Hour": "%b %-d, %-I %p", "Day": "%b %-d, %Y", "Month": "%B %Y", "Year": "%Y"}[resolution]
+    for sector, color in SECTOR_COLORS.items():
+        sub = d[d["Compass"] == sector]
+        if sub.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=sub["Period"], y=sub["Wind mph"], mode="markers", name=sector,
+            # the arrow points the way the wind is blowing (the opposite of the direction it comes from)
+            marker=dict(size=size + 9, color=color, symbol="arrow", angleref="up",
+                        angle=((sub["Wind dir °"] + 180) % 360).tolist(), line=dict(color=SURFACE, width=0.5)),
+            customdata=sub[["Wind dir °", "Gust mph"]],
+            hovertemplate=f"Wind from {sector} (%{{customdata[0]:.0f}}°)<br>%{{y:.1f}} mph · gusts to %{{customdata[1]:.0f}} mph<extra></extra>",
+        ))
+    calm = d[d["Compass"].isna()]
+    if not calm.empty:
+        fig.add_trace(go.Scatter(x=calm["Period"], y=calm["Wind mph"], mode="markers", name="no direction",
+                                 marker=dict(size=size, color=MUTED, symbol="circle-open"),
+                                 hovertemplate="Calm: no direction<extra></extra>"))
+    fig.update_xaxes(tickformat=TICKS[resolution], hoverformat=hover_x)
+    fig.update_yaxes(title_text="Wind speed (mph)", rangemode="tozero")
+    _base(fig, height=360)  # shared styling first, then this chart's legend title
+    fig.update_layout(legend=dict(title_text="Wind from"))
+    return fig
+
+
+def year_overlay_chart(df: pd.DataFrame, col: str, unit: str, name: str) -> go.Figure:
+    """The same metric month by month, one line per year. The newest year is the bright one."""
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    years = sorted(df["Year"].unique())
+    shades = ["#898781", "#a9a89f", "#c3c2b7"]  # older years, quiet grays (oldest darkest)
+    fig = go.Figure()
+    for i, y in enumerate(years):
+        d = df[df["Year"] == y].sort_values("MonthNum")
+        newest = y == years[-1]
+        color = ACCENT if newest else shades[min(i, len(shades) - 1)]
+        fig.add_trace(go.Scatter(
+            x=[months[m - 1] for m in d["MonthNum"]], y=d[col], mode="lines+markers", name=str(y),
+            line=dict(color=color, width=3 if newest else 1.5), marker=dict(size=8 if newest else 5),
+            hovertemplate=f"{y} " + "%{x}<br>%{y:,.1f} " + unit + "<extra></extra>",
+        ))
+        last = d.iloc[-1]
+        fig.add_annotation(x=months[int(last["MonthNum"]) - 1], y=last[col], text=str(y), showarrow=False, xanchor="left",
+                           xshift=8, font=dict(color=color if newest else INK2, size=12))
+    fig.update_xaxes(categoryorder="array", categoryarray=months)
+    fig.update_yaxes(title_text=unit or name, rangemode="tozero" if "°" not in unit else "normal")
+    return _base(fig, height=320)
+
+
+# ------------------------------------------------------ climate and wind seasons
+PHASE_COLORS = {"warm": "#e66767", "cool": "#3987e5", "neutral": "#5d5b57"}  # diverging poles + neutral gray
+SPEED_BAND_COLORS = ["#184f95", "#2a78d6", "#6da7ec", "#cde2fb"]               # one hue, brighter = windier
+
+
+def _sign_colors(values, threshold: float):
+    return [PHASE_COLORS["warm"] if v >= threshold else PHASE_COLORS["cool"] if v <= -threshold else PHASE_COLORS["neutral"] for v in values]
+
+
+def climate_index_chart(df: pd.DataFrame, col: str, title: str, threshold: float = 0.0) -> go.Figure:
+    """A monthly climate index as bars: warm phase red, cool phase blue, near zero gray."""
+    d = df.dropna(subset=[col])
+    fig = go.Figure(go.Bar(
+        x=d["Period"], y=d[col], marker=dict(color=_sign_colors(d[col], threshold or 1e-9), line=dict(width=0)),
+        hovertemplate="%{x|%b %Y}: %{y:+.2f}<extra></extra>",
+    ))
+    if threshold:
+        for y in (threshold, -threshold):
+            fig.add_hline(y=y, line=dict(color=MUTED, width=1, dash="dot"))
+    fig.update_layout(bargap=0.05)
+    fig.update_yaxes(title_text=title, zeroline=True, zerolinecolor=AXIS)
+    fig.update_xaxes(tickformat="%Y")
+    return _base(fig, height=250, legend=False)
+
+
+def climate_vs_local_chart(clim: pd.DataFrame, local: pd.DataFrame) -> go.Figure:
+    """Three stacked panels on one time axis: ENSO, then your station's monthly temperature and rain."""
+    from plotly.subplots import make_subplots
+
+    start, end = local["Period"].min(), local["Period"].max()
+    c = clim[(clim["Period"] >= start) & (clim["Period"] <= end)].dropna(subset=["oni"])
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07,
+                        subplot_titles=("ENSO (ONI)", "Your average temperature (°F)", "Your rain (inches per month)"))
+    fig.add_trace(go.Bar(x=c["Period"], y=c["oni"], marker=dict(color=_sign_colors(c["oni"], 0.5), line=dict(width=0)),
+                         hovertemplate="%{x|%b %Y}: ONI %{y:+.2f}<extra></extra>", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=local["Period"], y=local["Temp avg °F"], mode="lines+markers", line=dict(color=ACCENT, width=2),
+                             marker=dict(size=6), hovertemplate="%{x|%b %Y}: %{y:.1f}°F<extra></extra>", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Bar(x=local["Period"], y=local["Rain in"], marker=dict(color=ACCENT, line=dict(width=0)),
+                         hovertemplate="%{x|%b %Y}: %{y:.1f} in<extra></extra>", showlegend=False), row=3, col=1)
+    for y in (0.5, -0.5):
+        fig.add_hline(y=y, line=dict(color=MUTED, width=1, dash="dot"), row=1, col=1)
+    _base(fig, height=560, legend=False)
+    fig.update_layout(bargap=0.15, margin=dict(t=36))
+    fig.update_annotations(font=dict(color=INK2, size=12))
+    fig.update_xaxes(tickformat="%b %Y")
+    return fig
+
+
+def wind_rose_chart(rose: dict) -> go.Figure:
+    """A wind rose per season: bars point toward where the wind comes FROM, stacked by speed band."""
+    from plotly.subplots import make_subplots
+
+    seasons = [s for s in ["Winter", "Spring", "Summer", "Fall"] if s in rose]
+    compass = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    fig = make_subplots(rows=2, cols=2, specs=[[{"type": "polar"}, {"type": "polar"}], [{"type": "polar"}, {"type": "polar"}]],
+                        subplot_titles=seasons, vertical_spacing=0.14, horizontal_spacing=0.08)
+    for i, season in enumerate(seasons):
+        table = rose[season].reindex(compass)
+        for j, band in enumerate(table.columns):
+            fig.add_trace(go.Barpolar(
+                r=table[band], theta=compass, name=band, legendgroup=band, showlegend=(i == 0),
+                marker=dict(color=SPEED_BAND_COLORS[j], line=dict(color=SURFACE, width=1)),
+                hovertemplate="Wind from %{theta}, " + band + ": %{r:.1f}% of hours<extra></extra>",
+            ), row=i // 2 + 1, col=i % 2 + 1)
+    fig.update_polars(
+        bgcolor="rgba(0,0,0,0)", barmode="stack",
+        angularaxis=dict(direction="clockwise", rotation=90, tickfont=dict(color=INK2, size=11), linecolor=AXIS, gridcolor=GRID),
+        radialaxis=dict(ticksuffix="%", tickfont=dict(color=MUTED, size=10), gridcolor=GRID, linecolor=AXIS, angle=45),
+    )
+    _base(fig, height=680)
+    fig.update_layout(legend=dict(title_text="Wind speed", orientation="h", y=-0.04, yanchor="top"), margin=dict(t=60, b=40))
+    fig.update_annotations(font=dict(color=INK, size=13), yshift=22)  # keep each title clear of the N label
+    return fig
