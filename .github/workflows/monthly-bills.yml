@@ -7,7 +7,9 @@ name: Monthly tenant bills
 # a dry run in the log. To stop the tenant texts after seeing the preview, set SEND_ENABLED to false.
 on:
   schedule:
-    - cron: "0 18 28-31 * *"   # owners' preview; the job only acts on the day before the 1st
+    # owners' preview: the job only acts on the day before the 1st. Set at 12:00 UTC because GitHub often starts
+    # scheduled runs several hours late; a later start could slip past midnight UTC and skip the preview.
+    - cron: "0 12 28-31 * *"
     - cron: "0 18 1 * *"       # tenant texts, 18:00 UTC (11 AM Pacific)
   workflow_dispatch:
     inputs:
