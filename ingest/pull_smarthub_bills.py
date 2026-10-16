@@ -10,6 +10,7 @@ have PDF detail are skipped.
 """
 import datetime as dt
 import io
+import os
 import sqlite3
 import sys
 import time
@@ -142,11 +143,15 @@ def main(pdf_limit: int = 24) -> None:
                 continue
             save_meters(conn, ts, blocks)
             conn.commit()
-            summary = ", ".join(
-                f"{blk.meter} {blk.usage_kwh:,.0f} kWh ${blk.total:,.2f} {'ok' if blk.lines_ok else 'LINES DO NOT ADD UP'}"
-                if blk.total is not None else f"{blk.meter} {blk.usage_kwh:,.0f} kWh NO TOTAL FOUND"
-                for blk in blocks
-            )
+            if os.environ.get("SHOW_DETAILS") == "1":  # amounts stay out of the public logs by default
+                summary = ", ".join(
+                    f"{blk.meter} {blk.usage_kwh:,.0f} kWh ${blk.total:,.2f} {'ok' if blk.lines_ok else 'LINES DO NOT ADD UP'}"
+                    if blk.total is not None else f"{blk.meter} {blk.usage_kwh:,.0f} kWh NO TOTAL FOUND"
+                    for blk in blocks
+                )
+            else:
+                problems = [b for b in blocks if b.total is None or not b.lines_ok]
+                summary = f"{len(blocks)} meters read, " + ("all charge lines add up" if not problems else f"{len(problems)} did NOT add up")
             print(f"  {pacific_date(ts)}: {summary}")
             time.sleep(1)
         if bad:

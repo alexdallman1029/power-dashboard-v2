@@ -7,6 +7,11 @@ Usage:
     python -m billing.send_bills --mode tenants           # only the tenant texts
     python -m billing.send_bills --send --mode tenants    # actually send
     python -m billing.send_bills --send --only Owner      # send just one recipient (a careful test)
+    python -m billing.send_bills --send --mode tenants --force   # send again even though it already went out
+
+Each successful send is recorded in data/sent_log.json (month + recipient label + time), and a recipient is
+skipped if already sent for that billing month. Only successes are recorded, so a re-run retries failures.
+Set SHOW_MESSAGES=1 to print message text; by default logs show only lengths, since the repo's logs are public.
 
 Environment (only needed with --send):
     TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
@@ -51,7 +56,7 @@ def build_messages(ym: str) -> list[dict]:
         last_day = conn.execute("select max(day) from usage_daily").fetchone()[0]
         results = tenant_charges_for_ym(conn, ym)
         for site, kwh in vacant_site_usage(conn, ym).items():
-            print(f"::warning::{site} is vacant but metered {kwh:,.1f} kWh (counted in the owners' share)")
+            print(f"::warning::{site} is vacant but its meter used power above the alert level (counted in the owners' share)")
     finally:
         conn.close()
 
@@ -119,6 +124,40 @@ def build_owner_message(ym: str, tenant_msgs: list[dict], preview: bool = False,
     return "\n".join(lines)
 
 
+SENT_LOG = "data/sent_log.json"
+SHOW_MESSAGES = os.environ.get("SHOW_MESSAGES") == "1"
+
+
+def say(label: str, body: str) -> None:
+    """Log a message. This repo's Actions logs are public, so by default only its length is shown, never the
+    amounts. Set SHOW_MESSAGES=1 on your own computer to see the text."""
+    if SHOW_MESSAGES:
+        print(f"- {label}:\n{body}")
+    else:
+        print(f"- {label}: message ready ({len(body)} characters; text hidden in logs)")
+
+
+def load_sent_log(path: str | None = None) -> list[dict]:
+    try:
+        with open(path or SENT_LOG, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
+
+
+def was_sent(log: list[dict], ym: str, who: str) -> bool:
+    return any(r.get("ym") == ym and r.get("who") == who for r in log)
+
+
+def record_sent(ym: str, who: str, path: str | None = None) -> None:
+    """Remember a successful send (billing month + recipient label + time; never a number or an amount)."""
+    path = path or SENT_LOG
+    log = load_sent_log(path)
+    log.append({"ym": ym, "who": who, "at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M")})
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(log, f, indent=1)
+
+
 def send_sms(to: str, body: str) -> None:
     sid = os.environ["TWILIO_ACCOUNT_SID"]
     token = os.environ["TWILIO_AUTH_TOKEN"]
@@ -145,6 +184,7 @@ def main() -> int:
     ap.add_argument("--mode", choices=["all", "preview", "tenants"], default="all",
                     help="preview = owners only, tenants = tenant texts only, all = both (default)")
     ap.add_argument("--only", help='only these recipients, comma separated, e.g. "Owner" or "Owner,East Site"')
+    ap.add_argument("--force", action="store_true", help="send even to recipients already sent this billing month")
     args = ap.parse_args()
 
     ym = args.ym or last_closed_billing_ym(dt.date.today())
@@ -176,30 +216,40 @@ def main() -> int:
     print(f"Billing month {ym} ({'SEND' if args.send else 'DRY RUN'}, mode {args.mode})")
     print("Dashboard link: " + ("set, will be added to the owner text" if dashboard_url
                                 else "NOT set (add a repository VARIABLE named DASHBOARD_URL under Settings > Secrets and variables > Actions > Variables)"))
+    log = load_sent_log() if args.send else []
+
+    def deliver(who: str, number: str, body: str) -> bool:
+        """Send once per billing month per recipient; True on success. Failures are never recorded, so a re-run retries them."""
+        if not args.force and was_sent(log, ym, who):
+            print(f"  skipped {who}: already sent for {ym} (use force to send again)")
+            return True
+        try:
+            send_sms(number, body)
+        except Exception as e:  # keep going so one bad number doesn't block the rest
+            print(f"  FAILED {who}: {e}")
+            return False
+        record_sent(ym, who)
+        log.append({"ym": ym, "who": who})
+        print(f"  sent to {who}")
+        return True
+
     failed = []
     if owner_body:
-        print(f"- Owner:\n{owner_body}")
+        say("Owner", owner_body)
         if args.send:
             numbers = phones_for(phones, "Owner")
             if not numbers:
                 print('  skipped: no "Owner" entry in TENANT_PHONES')
             for i, number in enumerate(numbers, 1):
-                try:
-                    send_sms(number, owner_body)
-                    print(f"  sent to owner number {i}")
-                except Exception as e:
-                    print(f"  FAILED (owner number {i}): {e}")
-                    failed.append(f"Owner {i}")
+                if not deliver(f"Owner #{i}", number, owner_body):
+                    failed.append(f"Owner #{i}")
     for m in msgs:
-        print(f"- {m['tenant']}: {m['body']}")
+        say(m["tenant"], m["body"])
         if args.send:
             for i, number in enumerate(phones_for(phones, m["tenant"]), 1):
-                try:
-                    send_sms(number, m["body"])
-                    print(f"  sent (number {i})")
-                except Exception as e:  # keep going so one bad number doesn't block the rest
-                    print(f"  FAILED (number {i}): {e}")
-                    failed.append(m["tenant"])
+                who = m["tenant"] if i == 1 else f"{m['tenant']} #{i}"
+                if not deliver(who, number, m["body"]):
+                    failed.append(who)
     return 1 if failed else 0
 
 

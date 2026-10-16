@@ -7,6 +7,7 @@ power bill), separate from the Emporia usage_daily table. Re-running is safe.
 Blachly-Lane's portal offers monthly data only (no hourly or daily).
 """
 import datetime as dt
+import os
 import sqlite3
 import sys
 
@@ -45,9 +46,10 @@ def main(months_back: int = 24) -> None:
     if not rows:
         raise RuntimeError("SmartHub returned no monthly usage; refusing to continue")
     save(rows)
-    print(f"Saved {len(rows)} months from SmartHub:")
-    for month, kwh in rows:
-        print(f"  {month}: {kwh:,.0f} kWh")
+    print(f"Saved {len(rows)} months from SmartHub ({rows[0][0]} to {rows[-1][0]}).")
+    if os.environ.get("SHOW_DETAILS") == "1":  # this repo's Actions logs are public, so amounts stay out by default
+        for month, kwh in rows:
+            print(f"  {month}: {kwh:,.0f} kWh")
 
 
 if __name__ == "__main__":
