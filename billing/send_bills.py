@@ -32,7 +32,9 @@ import sys
 
 import requests
 
+from billing import rent as R
 from billing.compute import owner_share_for_ym, tenant_charges_for_ym, vacant_site_usage
+from billing.config import load_config
 from billing.period import billing_period_for_ym, last_closed_billing_ym
 from billing.utility import has_bill_tables, reconcile
 
@@ -49,7 +51,7 @@ def phones_for(phones: dict, key: str) -> list[str]:
     return [value] if isinstance(value, str) else [str(v) for v in value]
 
 
-def build_messages(ym: str) -> list[dict]:
+def build_messages(ym: str, rent_cfg: dict | None = None) -> list[dict]:
     start, end = billing_period_for_ym(ym)
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -66,16 +68,40 @@ def build_messages(ym: str) -> list[dict]:
             "Refusing to send bills from incomplete data."
         )
 
-    msgs = []
-    for _, row in results.iterrows():
-        msgs.append(
+    if rent_cfg is None:  # power-only texts (no RENT_CONFIG): the original one-line message
+        return [
             {
-                "tenant": row["Tenant"],
-                "amount": float(row["Charge ($)"]),
-                "kwh": float(row["kWh (calc)"]),
+                "tenant": row["Tenant"], "amount": float(row["Charge ($)"]), "kwh": float(row["kWh (calc)"]),
+                "has_power": True, "rent": 0.0, "internet": 0.0, "storage": 0.0, "total": float(row["Charge ($)"]),
                 "body": MESSAGE.format(amount=float(row["Charge ($)"])),
             }
-        )
+            for _, row in results.iterrows()
+        ]
+
+    # Rent, internet and storage on top of power. The text goes out in the month after the power cycle's label.
+    cfg = load_config()
+    rent_ym = R.next_month(ym)
+    unknown = set(rent_cfg["sites"]) - {s.name for s in cfg.sites}
+    if unknown:
+        raise RuntimeError(f"RENT_CONFIG names sites that do not exist in sites.toml: {sorted(unknown)}")
+    power = {row["Tenant"]: row for _, row in results.iterrows()}
+    msgs = []
+    for site in cfg.sites:
+        site_cfg = rent_cfg["sites"].get(site.name)
+        if site_cfg is not None and site_cfg.get("idle"):
+            continue  # e.g. the worktrader's Airstream: no rent, no text
+        row, people = power.get(site.name), cfg.people(site, rent_ym)
+        if row is None and people == 0:
+            continue  # vacant and nothing owed
+        if site_cfg is None:
+            raise RuntimeError(f"RENT_CONFIG has no settings for {site.name}; add it, or mark it idle")
+        charges = R.charges_for(site_cfg, people, rent_ym)
+        amount = float(row["Charge ($)"]) if row is not None else None
+        body, total = R.compose_text(rent_cfg, charges, amount)
+        msgs.append({
+            "tenant": site.name, "amount": amount or 0.0, "kwh": float(row["kWh (calc)"]) if row is not None else 0.0,
+            "has_power": row is not None, "total": total, "body": body, **charges,
+        })
     return msgs
 
 
@@ -83,7 +109,8 @@ def _md(d: dt.date) -> str:
     return f"{d.month}/{d.day}"
 
 
-def build_owner_message(ym: str, tenant_msgs: list[dict], preview: bool = False, dashboard_url: str = "") -> str | None:
+def build_owner_message(ym: str, tenant_msgs: list[dict], preview: bool = False, dashboard_url: str = "",
+                        rent_cfg: dict | None = None) -> str | None:
     """Utility-bill summary for the owners, with every tenant's amount so it can be checked
     before the tenant texts go out. Uses the newest utility bill on file."""
     start, end = billing_period_for_ym(ym)
@@ -109,9 +136,25 @@ def build_owner_message(ym: str, tenant_msgs: list[dict], preview: bool = False,
         f"farm meter {farm:,.0f} kWh ${float(latest['Farm $']):,.2f} (Emporia saw {seen:.1f}% of farm kWh).",
         f"Tenants for {_md(start)} - {_md(end)}:",
     ]
-    for m in tenant_msgs:
-        lines.append(f"{m['tenant']} ${m['amount']:,.2f} ({m['kwh']:,.0f} kWh)")
-    lines.append(f"Total ${sum(m['amount'] for m in tenant_msgs):,.2f}.")
+    if rent_cfg:  # full totals, so the owners can check everything before tenants are texted
+        lines[-1] = f"Tenant totals (power for {_md(start)} - {_md(end)}):"
+        for m in tenant_msgs:
+            parts = []
+            if m["rent"] > 0:
+                parts += [f"rent {R.money(m['rent'])}", f"internet {R.money(m['internet'])}"]
+            if m.get("has_power", True):
+                parts.append(f"power {R.money(m['amount'])}")
+            if m["storage"] > 0:
+                parts.append(f"storage {R.money(m['storage'])}")
+            lines.append(f"{m['tenant']} {R.money(m['total'])} = " + " + ".join(parts))
+        lines.append(f"Total {R.money(sum(m['total'] for m in tenant_msgs))}.")
+        idle = sorted(n for n, s in rent_cfg["sites"].items() if s.get("idle"))
+        if idle:
+            lines.append("Not billed (idle): " + ", ".join(idle) + ".")
+    else:
+        for m in tenant_msgs:
+            lines.append(f"{m['tenant']} ${m['amount']:,.2f} ({m['kwh']:,.0f} kWh)")
+        lines.append(f"Total ${sum(m['amount'] for m in tenant_msgs):,.2f}.")
     lines.append(
         f"Not billed to tenants: {owner['total_kwh']:,.0f} kWh (~${owner['total_cost']:,.2f}) = "
         f"your share of shared power {owner['kwh']:,.0f} kWh + vacant sites {owner['vacant_kwh']:,.0f} kWh "
@@ -134,7 +177,8 @@ def say(label: str, body: str) -> None:
     if SHOW_MESSAGES:
         print(f"- {label}:\n{body}")
     else:
-        print(f"- {label}: message ready ({len(body)} characters; text hidden in logs)")
+        enc, n = R.sms_segments(body)
+        print(f"- {label}: message ready ({len(body)} characters, {n} text segment{'s' if n != 1 else ''}, {enc}; text hidden in logs)")
 
 
 def load_sent_log(path: str | None = None) -> list[dict]:
@@ -188,14 +232,22 @@ def main() -> int:
     args = ap.parse_args()
 
     ym = args.ym or last_closed_billing_ym(dt.date.today())
-    tenant_msgs = build_messages(ym)
+    rent_cfg = R.load_rent_config()
+    if args.send and rent_cfg is None:
+        raise RuntimeError(
+            "RENT_CONFIG is not set, so the texts would leave out rent. Refusing to send. "
+            "Add the RENT_CONFIG secret (see billing/rent.py for its shape)."
+        )
+    print("Rent settings: " + ("loaded (amounts are private and never printed)" if rent_cfg else "not set, so power-only texts (dry run only)"))
+    tenant_msgs = build_messages(ym, rent_cfg)
     dashboard_url = os.environ.get("DASHBOARD_URL", "").strip()
     if dashboard_url and not dashboard_url.startswith("http"):
         raise RuntimeError("DASHBOARD_URL must start with http:// or https://")
 
     owner_body = None
     if args.mode in ("all", "preview"):
-        owner_body = build_owner_message(ym, tenant_msgs, preview=args.mode == "preview", dashboard_url=dashboard_url)
+        owner_body = build_owner_message(ym, tenant_msgs, preview=args.mode == "preview", dashboard_url=dashboard_url,
+                                         rent_cfg=rent_cfg)
     msgs = tenant_msgs if args.mode in ("all", "tenants") else []
 
     if args.only:

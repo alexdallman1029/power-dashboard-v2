@@ -10,6 +10,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import billing.send_bills as sb
 
 YM = "2026-09"
+# made-up numbers only: real rent never goes in this public repo
+FAKE_RENT = {"greeting": "Hello.", "payment": "Pay somehow.", "sites": {
+    "East Site": {"base_rent": 1000, "extra_person": 100, "internet_per_person": 10},
+    "West Site": {"base_rent": 1000, "extra_person": 100, "internet_per_person": 10},
+    "Yurt": {"base_rent": 900, "internet_per_person": 10, "storage": 40},
+    "Airstream": {"idle": True}}}
 PHONES = {"East Site": "+15550000001", "West Site": "+15550000002", "Yurt": ["+15550000003", "+15550000004"]}
 
 
@@ -21,7 +27,7 @@ def run(log_path, *flags, fail_for=None, capsys=None):
             raise RuntimeError("HTTP 400. Twilio error 21211: bad number")
         sent.append(to)
 
-    env = {"TENANT_PHONES": json.dumps(PHONES)}
+    env = {"TENANT_PHONES": json.dumps(PHONES), "RENT_CONFIG": json.dumps(FAKE_RENT)}
     argv = ["send_bills", "--send", "--mode", "tenants", "--ym", YM, *flags]
     with mock.patch.object(sb, "SENT_LOG", log_path), mock.patch.object(sb, "send_sms", fake_send), \
          mock.patch.dict(os.environ, env), mock.patch.object(sys, "argv", argv):
@@ -66,7 +72,7 @@ def test_logs_do_not_show_message_text_or_amounts(capsys):
     log = os.path.join(tempfile.mkdtemp(), "sent.json")
     run(log)
     out = capsys.readouterr().out
-    assert "power charges" not in out and "$" not in out
+    assert "Base rent" not in out and "$" not in out
     assert "message ready" in out
 
 
